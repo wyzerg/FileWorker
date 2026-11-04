@@ -183,6 +183,7 @@
 - 回退：停止传输并退出应用后，可回退本轮前端、Rust、窗口配置和文档改动；已经上传的
   远程文件不会自动回滚。测试服务、测试应用和测试目录均不应保留运行状态。
 - 验证：Finder 行为测试 `21/21`，完整前端测试 `96/96`，完整 Playwright `17/17`
-  （含 Finder 边界 `3/3`），Rust 工作区测试、TypeScript、生产前端构建、Rust 格式检查、
-  Clippy 和 macOS debug `.app` 构建通过。真实 Finder 验收本轮因 macOS 锁屏无法操作，
-  未将 Playwright 模拟事件当作原生验收证据。
+  （含 Finder 边界 `3/3`），默认 Rust 测试 `30` 项通过，另有 `21` 项真实协议测试按
+  仓库规则 ignored；TypeScript、生产前端构建、Rust 格式检查、Clippy 和 macOS debug
+  `.app` 构建通过。真实 Finder 验收本轮因 macOS 锁屏无法操作，未将 Playwright
+  模拟事件当作原生验收证据。
