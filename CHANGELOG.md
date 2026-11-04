@@ -193,12 +193,14 @@
 - 类型：发布。
 - 受影响模块：macOS Apple Silicon Release 构建、GitHub Releases 发布说明和校验文件。
 - 之前：只有源码和本地开发版 `.app`，没有可下载的编译产物。
-- 之后：提供未签名、未公证的 macOS Apple Silicon `.app.zip` 及 SHA-256 校验文件，
+- 之后：提供未使用 Apple Developer ID 分发签名、未公证的 macOS Apple Silicon
+  `.app.zip` 及 SHA-256 校验文件，
   GitHub Release 标记为 pre-release；不提供 Windows/Linux 或 Intel Mac 二进制。
 - 兼容性与限制：最低 macOS 版本仍为 `12.0`；首次打开可能出现系统安全提示。
   真实 Finder 拖入验收因构建机器锁屏未完成，Finder 拖出、目录拖入、递归传输、
   暂停/续传也不在本次发布范围。
 - 回退：删除该 GitHub pre-release 和对应标签即可撤回公开下载入口；源码提交和用户
-  本地配置不受影响。该包未签名，不能用于正式生产分发。
+  本地配置不受影响。该包未使用 Apple Developer ID 分发签名和公证，不能用于正式
+  生产分发。
 - 验证：Release 构建前重新通过前端、Playwright、Rust、类型、格式和 Clippy 检查；
   构建后核对 `.app` 为 `arm64`、压缩包内容和 SHA-256。发布不包含源码分支中的构建产物。

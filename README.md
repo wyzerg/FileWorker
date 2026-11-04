@@ -8,7 +8,8 @@ macOS 上已实现从 Finder 拖入普通文件到当前远程栏；Finder 拖�
 
 ## 项目状态
 
-项目处于开发阶段，目前提供源码和一个 macOS Apple Silicon 未签名实验性预发布；
+项目处于开发阶段，目前提供源码和一个未使用 Apple Developer ID 分发签名、未公证的
+macOS Apple Silicon 实验性预发布；
 尚未发布可下载的正式 Release。预发布包不代表 Windows/Linux 或 Intel Mac 已支持。
 已验收平台为 macOS Apple Silicon；常规窗口、SFTP、按钮/双栏传输和开发版 `.app`
 已验收。Finder 原生拖入代码和浏览器边界测试已完成，但当前机器锁屏，真实 Finder
@@ -17,7 +18,7 @@ macOS 上已实现从 Finder 拖入普通文件到当前远程栏；Finder 拖�
 
 后续继续完善系统文件管理器拖拽，再推进暂停/恢复和断点续传。
 公开下载的 macOS 安装包、构建自动化、签名与发布验收见
-[发布计划](docs/RELEASING.md)。当前预发布仍是未签名开发包，正式发行前还需完成
+[发布计划](docs/RELEASING.md)。当前预发布仍是未使用 Developer ID 签名和公证的开发包，正式发行前还需完成
 原生 Finder 验收、签名、公证、安装升级和回退检查。
 
 ## 平台边界
