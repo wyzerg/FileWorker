@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { api, errorCode, errorMessage } from "./api";
 import type { ConnectedSession, ConnectionAttempt, ConnectionProfile, DirectoryListing } from "./types";
 
@@ -27,7 +27,8 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
     if (oldSession) void api.disconnectSession(oldSession.sessionId).catch(() => {});
   }, []);
 
-  useEffect(() => {
+  // Release the old profile before the new connection controls become interactive.
+  useLayoutEffect(() => {
     mounted.current = true;
     setAttempt(null); setSession(null); setListing(null); setPath(""); setParentPath(null); setError("");
     setDialogError(""); setWorking(false); setLoading(false);

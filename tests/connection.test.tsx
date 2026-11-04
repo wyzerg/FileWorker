@@ -1,14 +1,17 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useLayoutEffect } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
+import { useRemoteConnection } from "../src/lib/useRemoteConnection";
+import type { ConnectionProfile } from "../src/lib/types";
 
 const fixture = vi.hoisted(() => ({
   trusted: false, authenticated: false,
   probe: vi.fn(), trust: vi.fn(), authenticate: vi.fn(), cancel: vi.fn(), disconnect: vi.fn(), listRemote: vi.fn(),
   listLocal: vi.fn(), enqueue: vi.fn(), snapshot: vi.fn(),
 }));
-const profile = {
+const profile: ConnectionProfile = {
   id: "e6814610-8703-4c50-ab27-e823c8577fc3", name: "测试 SFTP", host: "sftp.example.com",
   port: 22, username: "tester", authMethod: "password", privateKeyPath: null, remotePath: ".",
 };
@@ -126,6 +129,48 @@ async function start() {
   await screen.findByRole("button", { name: /测试 SFTP/ });
   fireEvent.click(screen.getByRole("button", { name: "连接服务器" }));
 }
+
+function immediateConnection(initialProfile: ConnectionProfile | null) {
+  return renderHook(({ selectedProfile }) => {
+    const connection = useRemoteConnection(selectedProfile, () => {});
+    useLayoutEffect(() => {
+      if (selectedProfile) void connection.connect();
+    }, [selectedProfile]);
+    return connection;
+  }, { initialProps: { selectedProfile: initialProfile } });
+}
+
+it("配置就绪后的首帧连接不会被延后的初始化清理取消", async () => {
+  fixture.trusted = true;
+  const { result, rerender } = immediateConnection(null);
+  rerender({ selectedProfile: profile });
+  await waitFor(() => expect(result.current.attempt?.phase).toBe("auth"));
+  expect(fixture.cancel).not.toHaveBeenCalled();
+});
+
+it("切换配置后可立即连接，旧握手的迟到响应不会取消新尝试", async () => {
+  fixture.trusted = true;
+  let finishOld!: (value: unknown) => void;
+  fixture.probe.mockImplementationOnce((_id, attemptId) => new Promise((resolve) => {
+    finishOld = (value) => resolve({
+      attemptId, host: profile.host, port: profile.port, trusted: true,
+      identity: { algorithm: "ssh-ed25519", fingerprint: "SHA256:old" },
+      ...value as object,
+    });
+  }));
+  const { result, rerender } = immediateConnection(profile);
+  const oldAttemptId = fixture.probe.mock.calls[0][1];
+  const nextProfile = { ...profile, id: "ee3b9e96-029c-44b6-9451-9828b3eb0052", name: "另一个连接" };
+  rerender({ selectedProfile: nextProfile });
+  await waitFor(() => expect(result.current.attempt?.phase).toBe("auth"));
+  const nextAttemptId = result.current.attempt!.id;
+  expect(nextAttemptId).not.toBe(oldAttemptId);
+  expect(result.current.attempt?.profile.id).toBe(nextProfile.id);
+  expect(fixture.cancel).toHaveBeenCalledWith(oldAttemptId);
+  await act(async () => { finishOld({}); });
+  expect(result.current.attempt?.id).toBe(nextAttemptId);
+  expect(fixture.cancel).not.toHaveBeenCalledWith(nextAttemptId);
+});
 
 it("首次连接先确认指纹，确认后才输入密码，成功后可进入远程目录", async () => {
   const user = userEvent.setup();
