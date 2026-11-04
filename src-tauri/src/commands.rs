@@ -30,6 +30,7 @@ pub struct Environment {
     home_path: String,
     shortcuts: Vec<Shortcut>,
     runtime: &'static str,
+    finder_drop: bool,
 }
 
 #[tauri::command]
@@ -61,6 +62,7 @@ pub fn get_environment(state: State<'_, AppState>) -> Result<Environment, CoreEr
             })
             .collect(),
         runtime: "desktop",
+        finder_drop: cfg!(target_os = "macos"),
     })
 }
 

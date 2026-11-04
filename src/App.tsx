@@ -14,6 +14,7 @@ import { useTransfers } from "./lib/useTransfers";
 import { TransferQueue } from "./components/TransferQueue";
 import { formatBytes } from "./lib/files";
 import { useTransferDrag } from "./lib/useTransferDrag";
+import { useFinderDrop } from "./lib/useFinderDrop";
 
 export default function App() {
   const [environment, setEnvironment] = useState<RuntimeEnvironment | null>(null);
@@ -77,6 +78,13 @@ export default function App() {
   const drag = useTransferDrag({
     enabled: transferReady, sessionId: remote.session?.sessionId ?? null,
     local: listing, remote: remote.listing, onTransfer: (requests) => { void transfers.enqueue(requests); },
+  });
+  const finderDrop = useFinderDrop({
+    available: isDesktop && environment?.finderDrop === true,
+    enabled: transferReady && !editor && !deleteTarget && !remote.attempt,
+    sessionId: remote.session?.sessionId ?? null, local: listing, remote: remote.listing,
+    onUpload: (paths, sessionId, destinationDir) => { void transfers.enqueueFinder(paths, sessionId, destinationDir); },
+    onInternalDragClear: drag.clear, onNotice: setNotice,
   });
   const rates = transfers.snapshot.jobs.reduce((value, job) => {
     if (job.state === "running") value[job.direction] += job.bytesPerSecond;
@@ -228,6 +236,7 @@ export default function App() {
                 })));
               }}
               drag={drag.pane("remote")}
+              externalDropTarget={finderDrop.target} dropRef={finderDrop.dropRef}
               onMenu={() => setMenuOpen((value) => !value)} />
           </div>
           <TransferQueue snapshot={transfers.snapshot} sessionId={remote.session?.sessionId ?? null}

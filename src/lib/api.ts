@@ -1,6 +1,8 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen, TauriEvent, type Event as TauriEventPayload } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { ConnectedSession, ConflictPolicy, ConnectionProfile, DirectoryListing, HostProbe, RuntimeEnvironment, TransferRequest, TransferSnapshot } from "./types";
+import type { ConnectedSession, ConflictPolicy, ConnectionProfile, DirectoryListing, FinderDropEvent, HostProbe, RuntimeEnvironment, TransferRequest, TransferSnapshot } from "./types";
 
 export const isDesktop = isTauri();
 const previewStorageKey = "fileworker.preview.profiles.v1";
@@ -52,7 +54,42 @@ async function desktopCommand<T>(command: string, args: Record<string, unknown>)
   return invoke(command, args);
 }
 
+type NativeDragPayload = {
+  paths?: string[];
+  position?: { x: number; y: number };
+} | null | undefined;
+
 export const api = {
+  async listenFinderDrop(handler: (event: FinderDropEvent) => void): Promise<() => void> {
+    if (!isDesktop) return () => {};
+    const target = { kind: "Webview" as const, label: getCurrentWebview().label };
+    const dispatch = (
+      phase: FinderDropEvent["phase"],
+      event: TauriEventPayload<NativeDragPayload>,
+    ) => {
+      const payload = event.payload;
+      const position = payload?.position
+        ? {
+            x: payload.position.x / Math.max(1, window.innerWidth * window.devicePixelRatio),
+            y: payload.position.y / Math.max(1, window.innerHeight * window.devicePixelRatio),
+          }
+        : { x: -1, y: -1 };
+      handler({
+        phase,
+        paths: payload?.paths,
+        position,
+      });
+    };
+    const unlisten = await Promise.all([
+      listen<NativeDragPayload>(TauriEvent.DRAG_ENTER, (event) => dispatch("enter", event), { target }),
+      listen<NativeDragPayload>(TauriEvent.DRAG_OVER, (event) => dispatch("over", event), { target }),
+      listen<NativeDragPayload>(TauriEvent.DRAG_DROP, (event) => dispatch("drop", event), { target }),
+      listen<NativeDragPayload>(TauriEvent.DRAG_LEAVE, (event) => dispatch("leave", event), { target }),
+    ]);
+    return () => { void Promise.all(unlisten.map((stop) => stop())); };
+  },
+  enqueueFinderUpload: (paths: string[], sessionId: string, destinationDir: string): Promise<string[]> =>
+    desktopCommand("enqueue_finder_upload", { paths, sessionId, destinationDir }),
   enqueueTransfers: (requests: TransferRequest[]): Promise<string[]> =>
     desktopCommand("enqueue_transfers", { requests }),
   transferSnapshot: (): Promise<TransferSnapshot> =>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Ref } from "react";
 import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpFromLine, ChevronDown, ChevronRight, Eye, EyeOff, File, FileArchive, FileCode2, FileImage, FileText, Folder, FolderOpen, HardDrive, Link2, LoaderCircle, Monitor, Pencil, PlugZap, Plus, RefreshCw, Search, Server, Unplug } from "lucide-react";
 import type { ConnectionProfile, DirectoryListing, FileEntry, SortDirection, SortKey } from "../lib/types";
 import { formatBytes, formatDate, isOrdinaryFile, visibleEntries } from "../lib/files";
@@ -15,7 +15,7 @@ function EntryIcon({ entry }: { entry: FileEntry }) {
   return <Icon size={18} className="file-icon" />;
 }
 
-export function FilePane({ side, listing, path, parentPath, onPathChange, onNavigate, loading, error, onChooseDirectory, profile, onNewProfile, onEditProfile, onMenu, preview = false, connected = false, connecting = false, onConnect, onDisconnect, transferEnabled = false, onTransfer, drag }: {
+export function FilePane({ side, listing, path, parentPath, onPathChange, onNavigate, loading, error, onChooseDirectory, profile, onNewProfile, onEditProfile, onMenu, preview = false, connected = false, connecting = false, onConnect, onDisconnect, transferEnabled = false, onTransfer, drag, externalDropTarget = false, dropRef }: {
   side: "local" | "remote";
   listing?: DirectoryListing | null;
   path: string;
@@ -37,6 +37,8 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
   transferEnabled?: boolean;
   onTransfer?: (entries: FileEntry[]) => void;
   drag?: FilePaneDrag;
+  externalDropTarget?: boolean;
+  dropRef?: Ref<HTMLDivElement>;
 }) {
   const local = side === "local";
   const navigable = (local || connected) && !preview;
@@ -91,7 +93,7 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
   };
   const label = local ? "本地" : "远程";
   return (
-    <section className={`file-pane file-pane--${side} ${drag?.target ? "file-pane--drop-target" : ""}`} aria-label={`${label}文件`}>
+    <section className={`file-pane file-pane--${side} ${drag?.target || externalDropTarget ? "file-pane--drop-target" : ""}`} aria-label={`${label}文件`}>
       <header className="pane-heading">
         <span className={`pane-icon ${local ? "local" : "remote"}`}>{local ? <Monitor size={18} /> : <Server size={18} />}</span>
         <div className="pane-title"><h2>{local ? "本地文件" : "远程文件"}</h2><span>{local ? (preview ? "浏览器预览" : "本地工作区") : (profile?.name ?? "SFTP")}</span></div>
@@ -125,7 +127,7 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
           {local ? <ArrowUpFromLine size={16} /> : <ArrowDownToLine size={16} />}
         </IconButton>
       </div>
-      <div className="file-list-container" aria-busy={loading || undefined}
+      <div className="file-list-container" ref={dropRef} aria-busy={loading || undefined}
         onDragEnter={(event) => { event.preventDefault(); }}
         onDragOver={(event) => {
           event.preventDefault();

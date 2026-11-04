@@ -32,6 +32,13 @@ export interface RuntimeEnvironment {
   homePath: string | null;
   shortcuts: { name: string; path: string }[];
   runtime: "desktop" | "browser";
+  finderDrop?: boolean;
+}
+
+export interface FinderDropEvent {
+  phase: "enter" | "over" | "drop" | "leave";
+  paths?: string[];
+  position: { x: number; y: number };
 }
 
 export type SortKey = "name" | "size" | "modified";

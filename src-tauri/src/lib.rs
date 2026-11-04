@@ -1,5 +1,6 @@
 mod commands;
 mod credentials;
+mod finder_drop;
 mod remote;
 mod transfers;
 
@@ -51,6 +52,7 @@ pub fn run() {
             transfers::resolve_transfer_conflict,
             transfers::set_transfer_concurrency,
             transfers::clear_finished_transfers,
+            finder_drop::enqueue_finder_upload,
         ])
         .build(tauri::generate_context!())
         .expect("无法启动 FileWorker")

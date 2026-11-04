@@ -53,14 +53,17 @@ export function useTransfers(onComplete: (job: TransferJob) => void, onNotice: (
     try { await action(); await refresh(); }
     catch (cause) { callbacks.current.onNotice(errorMessage(cause)); }
   };
-  const enqueue = async (requests: TransferRequest[]) => {
-    if (enqueueBusy.current || !isDesktop || !requests.length) return;
+  const submit = async (action: () => Promise<unknown>) => {
+    if (enqueueBusy.current || !isDesktop) return;
     enqueueBusy.current = true; setSubmitting(true);
-    try { await operate(() => api.enqueueTransfers(requests)); }
+    try { await operate(action); }
     finally { enqueueBusy.current = false; setSubmitting(false); }
   };
   return {
-    snapshot, submitting, enqueue,
+    snapshot, submitting,
+    enqueue: (requests: TransferRequest[]) => requests.length ? submit(() => api.enqueueTransfers(requests)) : Promise.resolve(),
+    enqueueFinder: (paths: string[], sessionId: string, destinationDir: string) =>
+      submit(() => api.enqueueFinderUpload(paths, sessionId, destinationDir)),
     cancel: (id: string) => operate(() => api.cancelTransfer(id)),
     retry: (id: string) => operate(() => api.retryTransfer(id)),
     resolve: (id: string, policy: ConflictPolicy) => operate(() => api.resolveTransferConflict(id, policy)),
