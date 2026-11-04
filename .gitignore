@@ -6,3 +6,33 @@ playwright-report/
 test-results/
 coverage/
 .superpowers/
+
+# Local editor state and generated Tauri schemas.
+.idea/
+.openidea/
+/src-tauri/gen/
+
+# Local Python environments and caches.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.log
+
+# Credentials and runtime data must never be committed.
+.env
+.env.*
+!.env.example
+.ssh/
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+/profiles.json
+/profiles.lock
+/known_hosts.json
+/known_hosts.lock
+.fileworker-*.part
+.fileworker-*.backup

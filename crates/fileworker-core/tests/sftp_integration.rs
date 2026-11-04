@@ -1,0 +1,1496 @@
+use fileworker_core::{
+    connections::ConnectionManager,
+    credentials::{CredentialStore, credential_account},
+    error::CoreError,
+    profiles::{AuthMethod, ConnectionProfile},
+    transfers::{
+        ConflictPolicy, TransferDirection, TransferManager, TransferRequest, TransferState,
+    },
+};
+use std::{
+    collections::HashMap,
+    fs,
+    io::{BufRead, BufReader, Read},
+    net::TcpListener,
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
+};
+use zeroize::Zeroizing;
+
+#[derive(Default)]
+struct MemoryCredentials {
+    values: Mutex<HashMap<String, String>>,
+    reads: AtomicUsize,
+    fail_writes: AtomicBool,
+}
+impl CredentialStore for MemoryCredentials {
+    fn get(&self, account: &str) -> Result<Zeroizing<String>, CoreError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.values
+            .lock()
+            .unwrap()
+            .get(account)
+            .cloned()
+            .map(Zeroizing::new)
+            .ok_or_else(|| CoreError::new("credential_missing", "没有已保存凭据"))
+    }
+    fn set(&self, account: &str, secret: &str) -> Result<(), CoreError> {
+        if self.fail_writes.load(Ordering::SeqCst) {
+            return Err(CoreError::new(
+                "credential_unavailable",
+                "测试安全存储不可用",
+            ));
+        }
+        self.values
+            .lock()
+            .unwrap()
+            .insert(account.into(), secret.into());
+        Ok(())
+    }
+    fn delete(&self, account: &str) -> Result<(), CoreError> {
+        self.values.lock().unwrap().remove(account);
+        Ok(())
+    }
+}
+
+struct BlockingCredentials {
+    memory: MemoryCredentials,
+    block_read: bool,
+    blocked: AtomicBool,
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl BlockingCredentials {
+    fn new(block_read: bool) -> (Arc<Self>, mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (entered, started) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        (
+            Arc::new(Self {
+                memory: MemoryCredentials::default(),
+                block_read,
+                blocked: AtomicBool::new(false),
+                entered,
+                release: Mutex::new(resume),
+            }),
+            started,
+            release,
+        )
+    }
+
+    fn wait(&self) {
+        if self.blocked.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.entered.send(()).unwrap();
+        self.release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+    }
+}
+
+impl CredentialStore for BlockingCredentials {
+    fn get(&self, account: &str) -> Result<Zeroizing<String>, CoreError> {
+        if self.block_read {
+            self.wait();
+        }
+        self.memory.get(account)
+    }
+
+    fn set(&self, account: &str, secret: &str) -> Result<(), CoreError> {
+        if !self.block_read {
+            self.wait();
+        }
+        self.memory.set(account, secret)
+    }
+
+    fn delete(&self, account: &str) -> Result<(), CoreError> {
+        self.memory.delete(account)
+    }
+}
+
+fn wait_until(condition: impl Fn() -> bool, timeout: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    condition()
+}
+
+struct Server {
+    child: Child,
+    port: u16,
+    key_path: String,
+}
+impl Server {
+    fn start(root: &Path, port: u16, key: &str) -> Self {
+        Self::start_with_algorithms(root, port, key, false)
+    }
+    fn start_with_algorithms(root: &Path, port: u16, key: &str, repeated: bool) -> Self {
+        let project = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let python = std::env::var_os("FILEWORKER_TEST_PYTHON")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| project.join("target/sftp-test-venv/bin/python"));
+        let mut child = Command::new(python)
+            .arg("-u")
+            .arg(project.join("tests/fixtures/sftp_server.py"))
+            .arg(root)
+            .arg(port.to_string())
+            .arg(key)
+            .arg(if repeated {
+                "repeat-algorithms"
+            } else {
+                "normal"
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("start isolated SFTP fixture");
+        let mut output = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut output)
+            .unwrap();
+        let ready: serde_json::Value =
+            serde_json::from_str(&output).expect("SFTP fixture ready JSON");
+        Self {
+            child,
+            port: ready["port"].as_u64().unwrap() as u16,
+            key_path: ready["keyPath"].as_str().unwrap().into(),
+        }
+    }
+    fn profile(&self) -> ConnectionProfile {
+        ConnectionProfile {
+            id: "e6814610-8703-4c50-ab27-e823c8577fc3".into(),
+            name: "隔离测试".into(),
+            host: "127.0.0.1".into(),
+            port: self.port,
+            username: "tester".into(),
+            auth_method: AuthMethod::Password,
+            private_key_path: None,
+            remote_path: ".".into(),
+        }
+    }
+}
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+fn id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+fn secret(value: &str) -> Option<Zeroizing<String>> {
+    Some(Zeroizing::new(value.into()))
+}
+
+fn connected_manager(
+    root: &Path,
+    config: &Path,
+    server: &Server,
+) -> (Arc<ConnectionManager>, String) {
+    let remote = Arc::new(ConnectionManager::new(
+        config.into(),
+        root.into(),
+        Arc::new(MemoryCredentials::default()),
+    ));
+    let attempt = id();
+    remote.probe(attempt.clone(), server.profile()).unwrap();
+    remote.trust(&attempt).unwrap();
+    let session = remote
+        .authenticate(&attempt, secret("test-password-only"), false)
+        .unwrap();
+    (remote, session.session_id)
+}
+
+fn transfer_request(
+    session: &str,
+    source: &str,
+    destination: &str,
+    upload: bool,
+) -> TransferRequest {
+    TransferRequest {
+        session_id: session.into(),
+        source_path: source.into(),
+        destination_dir: destination.into(),
+        direction: if upload {
+            TransferDirection::Upload
+        } else {
+            TransferDirection::Download
+        },
+    }
+}
+
+fn wait_for_job(queue: &TransferManager, job: &str, state: TransferState) {
+    assert!(
+        wait_until(
+            || queue
+                .snapshot()
+                .unwrap()
+                .jobs
+                .iter()
+                .any(|item| item.id == job && item.state == state),
+            Duration::from_secs(15)
+        ),
+        "expected {state:?}, snapshot: {:?}",
+        queue.snapshot().unwrap()
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn transfers_roundtrip_binary_empty_and_unicode_without_saving_credentials() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote.clone());
+    let data: Vec<u8> = (0..300_013).map(|index| (index % 251) as u8).collect();
+    fs::write(local.path().join("二进制.bin"), &data).unwrap();
+    fs::write(local.path().join("empty.txt"), []).unwrap();
+    let uploads = queue
+        .enqueue(vec![
+            transfer_request(
+                &session,
+                local.path().join("二进制.bin").to_str().unwrap(),
+                "/",
+                true,
+            ),
+            transfer_request(
+                &session,
+                local.path().join("empty.txt").to_str().unwrap(),
+                "/",
+                true,
+            ),
+        ])
+        .unwrap();
+    for job in &uploads {
+        wait_for_job(&queue, job, TransferState::Completed);
+    }
+    assert_eq!(
+        fs::read(fixture.path().join("files/二进制.bin")).unwrap(),
+        data
+    );
+    let jobs = queue
+        .enqueue(vec![
+            transfer_request(
+                &session,
+                "/二进制.bin",
+                downloads.path().to_str().unwrap(),
+                false,
+            ),
+            transfer_request(
+                &session,
+                "/empty.txt",
+                downloads.path().to_str().unwrap(),
+                false,
+            ),
+        ])
+        .unwrap();
+    for job in &jobs {
+        wait_for_job(&queue, job, TransferState::Completed);
+    }
+    assert_eq!(fs::read(downloads.path().join("二进制.bin")).unwrap(), data);
+    assert_eq!(fs::read(downloads.path().join("empty.txt")).unwrap(), b"");
+    assert_eq!(fs::read_dir(downloads.path()).unwrap().count(), 2);
+    assert!(
+        !serde_json::to_string(&queue.snapshot().unwrap())
+            .unwrap()
+            .contains("test-password-only")
+    );
+    assert!(remote.list(&session, "/").is_ok());
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn conflicts_never_silently_overwrite_and_support_skip_replace_and_keep_both() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote);
+    let source = local.path().join("hello.txt");
+    fs::write(&source, b"new contents").unwrap();
+    for policy in [
+        ConflictPolicy::Skip,
+        ConflictPolicy::KeepBoth,
+        ConflictPolicy::Overwrite,
+    ] {
+        let jobs = queue
+            .enqueue(vec![transfer_request(
+                &session,
+                source.to_str().unwrap(),
+                "/",
+                true,
+            )])
+            .unwrap();
+        wait_for_job(&queue, &jobs[0], TransferState::Conflict);
+        assert_eq!(
+            fs::read(fixture.path().join("files/hello.txt")).unwrap(),
+            b"hello"
+        );
+        queue.resolve_conflict(&jobs[0], policy).unwrap();
+        wait_for_job(
+            &queue,
+            &jobs[0],
+            if policy == ConflictPolicy::Skip {
+                TransferState::Skipped
+            } else {
+                TransferState::Completed
+            },
+        );
+        if policy == ConflictPolicy::KeepBoth {
+            assert_eq!(
+                fs::read(fixture.path().join("files/hello (1).txt")).unwrap(),
+                b"new contents"
+            );
+        }
+    }
+    assert_eq!(
+        fs::read(fixture.path().join("files/hello.txt")).unwrap(),
+        b"new contents"
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn cancel_cleans_partial_files_and_leaves_browsing_and_other_jobs_usable() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    fs::write(fixture.path().join("slow-transfers"), b"enabled").unwrap();
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote.clone());
+    let source = local.path().join("large.bin");
+    fs::write(&source, vec![71; 4 * 1024 * 1024]).unwrap();
+    let jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            source.to_str().unwrap(),
+            "/",
+            true,
+        )])
+        .unwrap();
+    assert!(wait_until(
+        || queue.snapshot().unwrap().jobs[0].transferred_bytes > 0,
+        Duration::from_secs(5)
+    ));
+    queue.cancel(&jobs[0]).unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Canceled);
+    assert!(!fixture.path().join("files/large.bin").exists());
+    assert!(
+        !fs::read_dir(fixture.path().join("files"))
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".fileworker-"))
+    );
+    assert!(remote.list(&session, "/").is_ok());
+    fs::remove_file(fixture.path().join("slow-transfers")).unwrap();
+    queue.retry(&jobs[0]).unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Completed);
+    assert_eq!(
+        fs::metadata(fixture.path().join("files/large.bin"))
+            .unwrap()
+            .len(),
+        4 * 1024 * 1024
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn transfer_queue_limits_concurrency_and_disconnect_stops_old_session_jobs() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    fs::write(fixture.path().join("slow-transfers"), b"enabled").unwrap();
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote.clone());
+    queue.set_concurrency(1).unwrap();
+    let mut requests = Vec::new();
+    for name in ["one.bin", "two.bin", "three.bin"] {
+        let source = local.path().join(name);
+        fs::write(&source, vec![7; 2 * 1024 * 1024]).unwrap();
+        requests.push(transfer_request(
+            &session,
+            source.to_str().unwrap(),
+            "/",
+            true,
+        ));
+    }
+    let jobs = queue.enqueue(requests).unwrap();
+    assert!(wait_until(
+        || queue
+            .snapshot()
+            .unwrap()
+            .jobs
+            .iter()
+            .any(|job| job.transferred_bytes > 0),
+        Duration::from_secs(5)
+    ));
+    let snapshot = queue.snapshot().unwrap();
+    assert_eq!(
+        snapshot
+            .jobs
+            .iter()
+            .filter(|job| job.state == TransferState::Running)
+            .count(),
+        1
+    );
+    assert_eq!(
+        snapshot
+            .jobs
+            .iter()
+            .filter(|job| job.state == TransferState::Queued)
+            .count(),
+        2
+    );
+    remote.disconnect(&session).unwrap();
+    for job in &jobs {
+        wait_for_job(&queue, job, TransferState::Canceled);
+    }
+    assert!(queue.retry(&jobs[0]).is_err());
+    assert!(
+        queue
+            .enqueue(vec![transfer_request(
+                &session,
+                "/hello.txt",
+                local.path().to_str().unwrap(),
+                false
+            )])
+            .is_err()
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn unsupported_sources_fail_independently_and_download_conflicts_preserve_originals() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote);
+    fs::write(local.path().join("hello.txt"), b"local original").unwrap();
+    let jobs = queue
+        .enqueue(vec![
+            transfer_request(&session, "/folder", local.path().to_str().unwrap(), false),
+            transfer_request(
+                &session,
+                "/hello.txt",
+                local.path().to_str().unwrap(),
+                false,
+            ),
+            transfer_request(&session, "/中文.txt", local.path().to_str().unwrap(), false),
+        ])
+        .unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Failed);
+    wait_for_job(&queue, &jobs[1], TransferState::Conflict);
+    wait_for_job(&queue, &jobs[2], TransferState::Completed);
+    assert_eq!(
+        fs::read(local.path().join("hello.txt")).unwrap(),
+        b"local original"
+    );
+    queue
+        .resolve_conflict(&jobs[1], ConflictPolicy::KeepBoth)
+        .unwrap();
+    wait_for_job(&queue, &jobs[1], TransferState::Completed);
+    assert_eq!(
+        fs::read(local.path().join("hello (1).txt")).unwrap(),
+        b"hello"
+    );
+    assert_eq!(
+        fs::read(local.path().join("hello.txt")).unwrap(),
+        b"local original"
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn targets_created_during_upload_and_download_are_not_overwritten() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote);
+    let source = local.path().join("raced.bin");
+    fs::write(&source, vec![71; 2 * 1024 * 1024]).unwrap();
+    fs::write(fixture.path().join("race-target"), b"raced.bin").unwrap();
+    let jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            source.to_str().unwrap(),
+            "/",
+            true,
+        )])
+        .unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Conflict);
+    assert_eq!(
+        fs::read(fixture.path().join("files/raced.bin")).unwrap(),
+        b"created by another writer"
+    );
+    assert!(
+        !fs::read_dir(fixture.path().join("files"))
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".fileworker-"))
+    );
+    queue.cancel(&jobs[0]).unwrap();
+
+    fs::write(
+        fixture.path().join("files/download.bin"),
+        vec![37; 2 * 1024 * 1024],
+    )
+    .unwrap();
+    fs::write(fixture.path().join("slow-transfers"), b"enabled").unwrap();
+    let jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            "/download.bin",
+            local.path().to_str().unwrap(),
+            false,
+        )])
+        .unwrap();
+    assert!(wait_until(
+        || queue
+            .snapshot()
+            .unwrap()
+            .jobs
+            .iter()
+            .any(|job| job.id == jobs[0] && job.transferred_bytes > 0),
+        Duration::from_secs(5)
+    ));
+    fs::write(local.path().join("download.bin"), b"local late writer").unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Conflict);
+    assert_eq!(
+        fs::read(local.path().join("download.bin")).unwrap(),
+        b"local late writer"
+    );
+    assert!(
+        !fs::read_dir(local.path())
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".fileworker-"))
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn failed_remote_overwrite_restores_original_and_download_overwrite_is_explicit() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote);
+    let source = local.path().join("hello.txt");
+    fs::write(&source, b"replacement").unwrap();
+    let jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            source.to_str().unwrap(),
+            "/",
+            true,
+        )])
+        .unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Conflict);
+    fs::write(fixture.path().join("fail-commit"), b"enabled").unwrap();
+    queue
+        .resolve_conflict(&jobs[0], ConflictPolicy::Overwrite)
+        .unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Failed);
+    assert_eq!(
+        fs::read(fixture.path().join("files/hello.txt")).unwrap(),
+        b"hello"
+    );
+    assert!(
+        !fs::read_dir(fixture.path().join("files"))
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".fileworker-"))
+    );
+    let jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            "/hello.txt",
+            local.path().to_str().unwrap(),
+            false,
+        )])
+        .unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Conflict);
+    queue
+        .resolve_conflict(&jobs[0], ConflictPolicy::Overwrite)
+        .unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Completed);
+    assert_eq!(fs::read(&source).unwrap(), b"hello");
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn source_changes_and_download_cancellation_do_not_commit_partial_targets() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote);
+    fs::write(fixture.path().join("slow-transfers"), b"enabled").unwrap();
+    for cancel in [false, true] {
+        let source = fixture.path().join("files/changing.bin");
+        fs::write(&source, vec![37; 4 * 1024 * 1024]).unwrap();
+        let jobs = queue
+            .enqueue(vec![transfer_request(
+                &session,
+                "/changing.bin",
+                local.path().to_str().unwrap(),
+                false,
+            )])
+            .unwrap();
+        assert!(wait_until(
+            || queue
+                .snapshot()
+                .unwrap()
+                .jobs
+                .iter()
+                .any(|job| job.id == jobs[0] && job.transferred_bytes > 0),
+            Duration::from_secs(5)
+        ));
+        if cancel {
+            queue.cancel(&jobs[0]).unwrap();
+        } else {
+            fs::write(&source, b"changed source").unwrap();
+        }
+        wait_for_job(
+            &queue,
+            &jobs[0],
+            if cancel {
+                TransferState::Canceled
+            } else {
+                TransferState::Failed
+            },
+        );
+        assert!(!local.path().join("changing.bin").exists());
+        assert_eq!(fs::read_dir(local.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn queue_shutdown_cancels_queued_work_and_cleans_running_uploads() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote);
+    queue.set_concurrency(1).unwrap();
+    fs::write(fixture.path().join("slow-transfers"), b"enabled").unwrap();
+    let first = local.path().join("first.bin");
+    let second = local.path().join("second.bin");
+    fs::write(&first, vec![19; 2 * 1024 * 1024]).unwrap();
+    fs::write(&second, b"queued").unwrap();
+    queue
+        .enqueue(vec![
+            transfer_request(&session, first.to_str().unwrap(), "/", true),
+            transfer_request(&session, second.to_str().unwrap(), "/", true),
+        ])
+        .unwrap();
+    assert!(wait_until(
+        || queue.snapshot().unwrap().jobs[0].transferred_bytes > 0,
+        Duration::from_secs(5)
+    ));
+    queue.shutdown();
+    assert!(
+        queue
+            .snapshot()
+            .unwrap()
+            .jobs
+            .iter()
+            .all(|job| job.state == TransferState::Canceled)
+    );
+    assert!(!fixture.path().join("files/first.bin").exists());
+    assert!(!fixture.path().join("files/second.bin").exists());
+    assert!(
+        queue
+            .enqueue(vec![transfer_request(
+                &session,
+                second.to_str().unwrap(),
+                "/",
+                true
+            )])
+            .is_err()
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn transfer_transport_rechecks_changed_host_before_any_authentication() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host-a");
+    let port = server.port;
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote);
+    let authentication = fs::read(fixture.path().join("auth-events")).unwrap();
+    drop(server);
+    let _changed = Server::start(fixture.path(), port, "host-b");
+    let jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            "/hello.txt",
+            local.path().to_str().unwrap(),
+            false,
+        )])
+        .unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Failed);
+    let snapshot = queue.snapshot().unwrap();
+    assert!(snapshot.jobs[0].error.as_deref().unwrap().contains("指纹"));
+    assert_eq!(
+        fs::read(fixture.path().join("auth-events")).unwrap(),
+        authentication
+    );
+    assert_eq!(fs::read_dir(local.path()).unwrap().count(), 0);
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; run under ASan for bounds checking"]
+fn repeated_server_signature_algorithms_do_not_corrupt_private_key_authentication() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start_with_algorithms(fixture.path(), 0, "host", true);
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+    );
+    let mut profile = server.profile();
+    profile.auth_method = AuthMethod::PrivateKey;
+    profile.private_key_path = Some(server.key_path.clone());
+    let attempt = id();
+    manager.probe(attempt.clone(), profile).unwrap();
+    manager.trust(&attempt).unwrap();
+    let session = manager
+        .authenticate(&attempt, secret("test-key-passphrase"), false)
+        .unwrap();
+    assert!(
+        manager
+            .list(&session.session_id, "/")
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.name == "hello.txt")
+    );
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn trust_authentication_browsing_credentials_and_changed_host_are_real_protocol_operations() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host-a");
+    let credentials = Arc::new(MemoryCredentials::default());
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        PathBuf::from("/"),
+        credentials.clone(),
+    );
+    let profile = server.profile();
+
+    let attempt = id();
+    let probe = manager.probe(attempt.clone(), profile.clone()).unwrap();
+    assert!(!probe.trusted);
+    assert!(probe.identity.fingerprint.starts_with("SHA256:"));
+    assert_eq!(
+        manager
+            .authenticate(&attempt, None, false)
+            .unwrap_err()
+            .code,
+        "host_not_trusted"
+    );
+    assert_eq!(credentials.reads.load(Ordering::SeqCst), 0);
+    assert!(!fixture.path().join("auth-events").exists());
+    manager.cancel(&attempt).unwrap();
+    assert_eq!(manager.trust(&attempt).unwrap_err().code, "attempt_expired");
+    assert!(!config.path().join("known_hosts.json").exists());
+
+    let attempt = id();
+    manager.probe(attempt.clone(), profile.clone()).unwrap();
+    manager.trust(&attempt).unwrap();
+    let wrong = manager
+        .authenticate(&attempt, secret("wrong-test-password"), false)
+        .unwrap_err();
+    assert_eq!(wrong.code, "authentication_failed");
+    assert!(!wrong.message.contains("wrong-test-password"));
+    assert!(credentials.values.lock().unwrap().is_empty());
+    let connected = manager
+        .authenticate(&attempt, secret("test-password-only"), true)
+        .unwrap();
+    assert!(connected.warning.is_none());
+    let listing = manager.list(&connected.session_id, "/.").unwrap();
+    assert_eq!(listing.path, "/");
+    assert_eq!(listing.parent_path, None);
+    assert!(
+        listing
+            .entries
+            .iter()
+            .any(|item| item.name == "hello.txt" && item.size == Some(5))
+    );
+    assert!(
+        listing
+            .entries
+            .iter()
+            .any(|item| item.name == ".hidden" && item.hidden)
+    );
+    assert!(listing.entries.iter().any(|item| item.name == "中文.txt"));
+    assert!(
+        listing
+            .entries
+            .iter()
+            .any(|item| item.name == "folder-link" && item.is_symlink && item.is_dir)
+    );
+    assert!(
+        listing
+            .entries
+            .iter()
+            .any(|item| item.name == r"dir\name" && item.path == r"/dir\name")
+    );
+    assert!(listing.entries[0].is_dir);
+    let child = manager.list(&connected.session_id, "/folder").unwrap();
+    assert_eq!(child.parent_path, Some("/".into()));
+    assert_eq!(
+        manager
+            .list(&connected.session_id, "/missing")
+            .unwrap_err()
+            .code,
+        "remote_directory"
+    );
+    assert_eq!(
+        manager
+            .list(&connected.session_id, "/denied")
+            .unwrap_err()
+            .code,
+        "remote_directory"
+    );
+    assert_eq!(
+        manager
+            .list(&connected.session_id, "child.txt")
+            .unwrap_err()
+            .code,
+        "invalid_remote_path"
+    );
+    // Each request carries its base explicitly; the backend has no mutable working directory.
+    assert_eq!(
+        manager
+            .list(&connected.session_id, "/folder/.")
+            .unwrap()
+            .path,
+        "/folder"
+    );
+    assert_eq!(
+        manager
+            .list(&connected.session_id, "/alias/..")
+            .unwrap()
+            .path,
+        "/physical"
+    );
+    manager.disconnect(&connected.session_id).unwrap();
+    assert_eq!(
+        manager.list(&connected.session_id, "/").unwrap_err().code,
+        "session_closed"
+    );
+
+    let attempt = id();
+    assert!(
+        manager
+            .probe(attempt.clone(), profile.clone())
+            .unwrap()
+            .trusted
+    );
+    let saved = manager.authenticate(&attempt, None, false).unwrap();
+    assert_eq!(credentials.reads.load(Ordering::SeqCst), 2);
+    let late_canceled = id();
+    manager.cancel(&late_canceled).unwrap();
+    assert_eq!(
+        manager
+            .probe(late_canceled, profile.clone())
+            .unwrap_err()
+            .code,
+        "attempt_expired",
+    );
+    assert_eq!(manager.list(&saved.session_id, "/").unwrap().path, "/");
+    manager.disconnect(&saved.session_id).unwrap();
+
+    let mut key_profile = profile.clone();
+    key_profile.auth_method = AuthMethod::PrivateKey;
+    key_profile.private_key_path = Some(server.key_path.clone());
+    let attempt = id();
+    manager.probe(attempt.clone(), key_profile).unwrap();
+    assert_eq!(
+        manager
+            .authenticate(&attempt, secret("wrong-passphrase"), false)
+            .unwrap_err()
+            .code,
+        "authentication_failed"
+    );
+    let previous_connections = fs::read_to_string(fixture.path().join("connections"))
+        .unwrap()
+        .lines()
+        .count();
+    let by_key = manager
+        .authenticate(&attempt, secret("test-key-passphrase"), false)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(fixture.path().join("connections"))
+            .unwrap()
+            .lines()
+            .count(),
+        previous_connections + 1,
+        "authentication retry must use a fresh SSH transport",
+    );
+    assert!(
+        !manager
+            .list(&by_key.session_id, "/")
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    let port = server.port;
+    drop(server);
+    assert_eq!(
+        manager.list(&by_key.session_id, "/").unwrap_err().code,
+        "connection_lost"
+    );
+    let replacement = Server::start(fixture.path(), port, "host-b");
+    assert_eq!(
+        manager.probe(id(), replacement.profile()).unwrap_err().code,
+        "host_key_changed"
+    );
+    assert_eq!(credentials.reads.load(Ordering::SeqCst), 2);
+    drop(replacement);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            fixture.path().join("files/denied"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn canceled_expired_and_superseded_attempts_cannot_authenticate() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let credentials = Arc::new(MemoryCredentials::default());
+    let manager = ConnectionManager::with_timeouts(
+        config.path().into(),
+        PathBuf::from("/"),
+        credentials.clone(),
+        Duration::from_secs(3),
+        Duration::from_millis(100),
+    );
+    let old = id();
+    manager.probe(old.clone(), server.profile()).unwrap();
+    let new = id();
+    manager.probe(new.clone(), server.profile()).unwrap();
+    assert_eq!(
+        manager.authenticate(&old, None, false).unwrap_err().code,
+        "attempt_expired"
+    );
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(manager.trust(&new).unwrap_err().code, "attempt_expired");
+    assert_eq!(credentials.reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh and ssh-keygen; see README"]
+fn openssh_encrypted_and_plain_keys_work_and_credential_storage_failure_is_nonfatal() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let credentials = Arc::new(MemoryCredentials::default());
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        credentials.clone(),
+    );
+    for (path, passphrase) in [
+        ("~/client-ed25519", "test-ed25519-passphrase"),
+        ("~/client-plain", ""),
+    ] {
+        let mut profile = server.profile();
+        profile.auth_method = AuthMethod::PrivateKey;
+        profile.private_key_path = Some(path.into());
+        let attempt = id();
+        let probe = manager.probe(attempt.clone(), profile).unwrap();
+        if !probe.trusted {
+            manager.trust(&attempt).unwrap();
+        }
+        let session = manager
+            .authenticate(&attempt, secret(passphrase), false)
+            .unwrap();
+        assert_eq!(manager.list(&session.session_id, "/").unwrap().path, "/");
+        manager.disconnect(&session.session_id).unwrap();
+    }
+    credentials.fail_writes.store(true, Ordering::SeqCst);
+    let attempt = id();
+    manager.probe(attempt.clone(), server.profile()).unwrap();
+    let session = manager
+        .authenticate(&attempt, secret("test-password-only"), true)
+        .unwrap();
+    assert!(session.warning.is_some());
+    assert!(credentials.values.lock().unwrap().is_empty());
+    assert_eq!(manager.list(&session.session_id, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn changed_host_during_authentication_retry_is_blocked_before_reading_saved_credentials() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "before");
+    let credentials = Arc::new(MemoryCredentials::default());
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        PathBuf::from("/"),
+        credentials.clone(),
+    );
+    let attempt = id();
+    manager.probe(attempt.clone(), server.profile()).unwrap();
+    manager.trust(&attempt).unwrap();
+    assert_eq!(
+        manager
+            .authenticate(&attempt, secret("wrong"), false)
+            .unwrap_err()
+            .code,
+        "authentication_failed"
+    );
+    let port = server.port;
+    drop(server);
+    let _replacement = Server::start(fixture.path(), port, "after");
+    assert_eq!(
+        manager
+            .authenticate(&attempt, None, false)
+            .unwrap_err()
+            .code,
+        "host_key_changed"
+    );
+    assert_eq!(credentials.reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn expiry_closes_the_socket_and_prevents_authentication_after_a_keychain_wait() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (credentials, started, release) = BlockingCredentials::new(true);
+    let profile = server.profile();
+    credentials
+        .memory
+        .set(&credential_account(&profile), "test-password-only")
+        .unwrap();
+    let manager = Arc::new(ConnectionManager::with_timeouts(
+        config.path().into(),
+        PathBuf::from("/"),
+        credentials,
+        Duration::from_secs(3),
+        Duration::from_millis(300),
+    ));
+    let attempt = id();
+    manager.probe(attempt.clone(), profile).unwrap();
+    manager.trust(&attempt).unwrap();
+    let worker = {
+        let manager = manager.clone();
+        std::thread::spawn(move || manager.authenticate(&attempt, None, false))
+    };
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let disconnected = wait_until(
+        || fixture.path().join("disconnect-events").exists(),
+        Duration::from_secs(1),
+    );
+    release.send(()).unwrap();
+    let result = worker.join().unwrap();
+    assert!(
+        disconnected,
+        "expired attempts must close even without another manager call"
+    );
+    assert_eq!(result.unwrap_err().code, "attempt_expired");
+    assert!(
+        !fixture.path().join("auth-events").exists(),
+        "expired credentials must never be sent"
+    );
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn forgetting_credentials_cannot_be_undone_by_a_canceled_in_flight_save() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (credentials, started, release) = BlockingCredentials::new(false);
+    let manager = Arc::new(ConnectionManager::new(
+        config.path().into(),
+        PathBuf::from("/"),
+        credentials.clone(),
+    ));
+    let profile = server.profile();
+    let attempt = id();
+    manager.probe(attempt.clone(), profile.clone()).unwrap();
+    manager.trust(&attempt).unwrap();
+    let auth = {
+        let manager = manager.clone();
+        let attempt = attempt.clone();
+        std::thread::spawn(move || {
+            manager.authenticate(&attempt, secret("test-password-only"), true)
+        })
+    };
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    manager.cancel(&attempt).unwrap();
+    let (done, finished) = mpsc::channel();
+    let forget = {
+        let manager = manager.clone();
+        std::thread::spawn(move || {
+            let result = manager.forget_credential(&profile);
+            done.send(()).unwrap();
+            result
+        })
+    };
+    let _ = finished.recv_timeout(Duration::from_millis(100));
+    release.send(()).unwrap();
+    assert_eq!(auth.join().unwrap().unwrap_err().code, "attempt_expired");
+    forget.join().unwrap().unwrap();
+    assert!(
+        credentials.memory.values.lock().unwrap().is_empty(),
+        "a late save must not restore credentials after forgetting completes",
+    );
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn canceled_credential_saves_restore_the_previous_value_without_touching_the_new_session() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    for previous in [None, Some("previous-saved-value")] {
+        let (credentials, started, release) = BlockingCredentials::new(false);
+        let profile = server.profile();
+        let account = credential_account(&profile);
+        if let Some(previous) = previous {
+            credentials.memory.set(&account, previous).unwrap();
+        }
+        let manager = Arc::new(ConnectionManager::new(
+            config.path().into(),
+            fixture.path().into(),
+            credentials.clone(),
+        ));
+        let attempt = id();
+        let probe = manager.probe(attempt.clone(), profile.clone()).unwrap();
+        if !probe.trusted {
+            manager.trust(&attempt).unwrap();
+        }
+        let old_auth = {
+            let manager = manager.clone();
+            let attempt = attempt.clone();
+            std::thread::spawn(move || {
+                manager.authenticate(&attempt, secret("test-password-only"), true)
+            })
+        };
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        manager.cancel(&attempt).unwrap();
+        let next = id();
+        manager.probe(next.clone(), profile).unwrap();
+        let connected = manager
+            .authenticate(&next, secret("test-password-only"), false)
+            .unwrap();
+        release.send(()).unwrap();
+        assert_eq!(
+            old_auth.join().unwrap().unwrap_err().code,
+            "attempt_expired"
+        );
+        assert_eq!(
+            credentials
+                .memory
+                .values
+                .lock()
+                .unwrap()
+                .get(&account)
+                .map(String::as_str),
+            previous,
+            "a canceled save must restore the exact previous state"
+        );
+        assert_eq!(manager.list(&connected.session_id, "/").unwrap().path, "/");
+    }
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn a_canceled_keychain_prompt_does_not_block_another_credential_identity() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (credentials, started, release) = BlockingCredentials::new(true);
+    let first_profile = server.profile();
+    let mut next_profile = first_profile.clone();
+    next_profile.id = id();
+    for profile in [&first_profile, &next_profile] {
+        credentials
+            .memory
+            .set(&credential_account(profile), "test-password-only")
+            .unwrap();
+    }
+    let manager = Arc::new(ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        credentials,
+    ));
+    let attempt = id();
+    manager.probe(attempt.clone(), first_profile).unwrap();
+    manager.trust(&attempt).unwrap();
+    let old_auth = {
+        let manager = manager.clone();
+        let attempt = attempt.clone();
+        std::thread::spawn(move || manager.authenticate(&attempt, None, false))
+    };
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    manager.cancel(&attempt).unwrap();
+    let next = id();
+    manager.probe(next.clone(), next_profile).unwrap();
+    let (done, finished) = mpsc::channel();
+    let next_auth = {
+        let manager = manager.clone();
+        std::thread::spawn(move || {
+            let result = manager.authenticate(&next, None, false);
+            done.send(()).unwrap();
+            result
+        })
+    };
+    let independent = finished.recv_timeout(Duration::from_millis(500)).is_ok();
+    release.send(()).unwrap();
+    assert_eq!(
+        old_auth.join().unwrap().unwrap_err().code,
+        "attempt_expired"
+    );
+    let connected = next_auth.join().unwrap().unwrap();
+    assert!(
+        independent,
+        "an unrelated credential must not wait for an old Keychain prompt"
+    );
+    assert_eq!(manager.list(&connected.session_id, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn failed_retry_handshake_closes_its_new_socket_without_another_cancel() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let manager = ConnectionManager::with_timeouts(
+        config.path().into(),
+        PathBuf::from("/"),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_millis(250),
+        Duration::from_secs(120),
+    );
+    let profile = server.profile();
+    let attempt = id();
+    manager.probe(attempt.clone(), profile.clone()).unwrap();
+    manager.trust(&attempt).unwrap();
+    assert_eq!(
+        manager
+            .authenticate(&attempt, secret("wrong"), false)
+            .unwrap_err()
+            .code,
+        "authentication_failed",
+    );
+    drop(server);
+    let listener = TcpListener::bind(("127.0.0.1", profile.port)).unwrap();
+    let (closed, received) = mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut buffer = [0; 256];
+        let eof = loop {
+            match socket.read(&mut buffer) {
+                Ok(0) => break true,
+                Ok(_) => {}
+                Err(_) => break false,
+            }
+        };
+        closed.send(eof).unwrap();
+    });
+    assert_eq!(
+        manager
+            .authenticate(&attempt, secret("test-password-only"), false)
+            .unwrap_err()
+            .code,
+        "ssh_handshake",
+    );
+    let closed_without_cancel = received.recv_timeout(Duration::from_millis(500));
+    manager.cancel(&attempt).unwrap();
+    peer.join().unwrap();
+    assert_eq!(
+        closed_without_cancel.ok(),
+        Some(true),
+        "retry sockets must be closed on failure"
+    );
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn a_contended_trust_file_lock_does_not_block_connection_cancellation() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let manager = Arc::new(ConnectionManager::new(
+        config.path().into(),
+        PathBuf::from("/"),
+        Arc::new(MemoryCredentials::default()),
+    ));
+    let attempt = id();
+    manager.probe(attempt.clone(), server.profile()).unwrap();
+    let lock = fs::File::create(config.path().join("known_hosts.lock")).unwrap();
+    lock.lock().unwrap();
+    let (started, entered) = mpsc::channel();
+    let trust = {
+        let manager = manager.clone();
+        let attempt = attempt.clone();
+        std::thread::spawn(move || {
+            started.send(()).unwrap();
+            manager.trust(&attempt)
+        })
+    };
+    entered.recv_timeout(Duration::from_secs(2)).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let (done, finished) = mpsc::channel();
+    let cancel = {
+        let manager = manager.clone();
+        std::thread::spawn(move || {
+            let result = manager.cancel(&attempt);
+            done.send(()).unwrap();
+            result
+        })
+    };
+    let canceled_before_unlock = finished.recv_timeout(Duration::from_millis(200)).is_ok();
+    lock.unlock().unwrap();
+    let trust_result = trust.join().unwrap();
+    cancel.join().unwrap().unwrap();
+    assert!(
+        canceled_before_unlock,
+        "filesystem contention must not hold the lifecycle lock"
+    );
+    assert_eq!(trust_result.unwrap_err().code, "attempt_expired");
+    assert!(
+        !config.path().join("known_hosts.json").exists(),
+        "a canceled confirmation must not persist after waiting for the file lock"
+    );
+}
+
+#[test]
+fn unresponsive_ssh_server_times_out_without_blocking_forever() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = tempfile::tempdir().unwrap();
+    let manager = ConnectionManager::with_timeouts(
+        config.path().into(),
+        PathBuf::from("/"),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_millis(200),
+        Duration::from_secs(120),
+    );
+    let hold = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        drop(socket);
+    });
+    let profile = ConnectionProfile {
+        id: id(),
+        name: "timeout".into(),
+        host: "127.0.0.1".into(),
+        port,
+        username: "test".into(),
+        auth_method: AuthMethod::Password,
+        private_key_path: None,
+        remote_path: ".".into(),
+    };
+    let start = std::time::Instant::now();
+    assert!(manager.probe(id(), profile).is_err());
+    assert!(start.elapsed() < Duration::from_secs(2));
+    hold.join().unwrap();
+}
+
+#[test]
+fn cancel_interrupts_an_in_progress_ssh_handshake() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = tempfile::tempdir().unwrap();
+    let manager = Arc::new(ConnectionManager::with_timeouts(
+        config.path().into(),
+        PathBuf::from("/"),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_secs(3),
+        Duration::from_secs(120),
+    ));
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        accepted_tx.send(()).unwrap();
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        drop(socket);
+    });
+    let attempt = id();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let worker = {
+        let manager = manager.clone();
+        let attempt = attempt.clone();
+        std::thread::spawn(move || {
+            let _ = finished_tx.send(manager.probe(
+                attempt,
+                ConnectionProfile {
+                    id: id(),
+                    name: "cancel".into(),
+                    host: "127.0.0.1".into(),
+                    port,
+                    username: "test".into(),
+                    auth_method: AuthMethod::Password,
+                    private_key_path: None,
+                    remote_path: ".".into(),
+                },
+            ));
+        })
+    };
+    accepted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    manager.cancel(&attempt).unwrap();
+    let outcome = finished_rx.recv_timeout(Duration::from_millis(400));
+    release_tx.send(()).unwrap();
+    server.join().unwrap();
+    worker.join().unwrap();
+    assert!(
+        outcome.is_ok(),
+        "cancel should interrupt the socket instead of waiting for the network timeout"
+    );
+    assert!(outcome.unwrap().is_err());
+}

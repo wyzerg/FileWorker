@@ -1,0 +1,22 @@
+[package]
+name = "fileworker-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "fileworker_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+fileworker-core = { path = "../crates/fileworker-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde.workspace = true
+zeroize = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"

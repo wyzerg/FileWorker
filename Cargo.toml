@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/fileworker-core", "src-tauri"]
+default-members = ["crates/fileworker-core"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+
+[patch.crates-io]
+# The registry release overflows its signing-algorithm buffer on duplicate peer algorithms.
+libssh2-sys = { git = "https://github.com/rust-lang/ssh2-rs", rev = "60b9c193bcf0511aa569d1408a92fd3ba803f4b7" }
