@@ -180,6 +180,8 @@ h1, h2, h3, p { margin: 0; }
 .file-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--canvas); }
 .file-pane--local { border-right: 1px solid var(--line); --pane-accent: var(--accent); --pane-soft: var(--accent-soft); }
 .file-pane--remote { --pane-accent: var(--blue); --pane-soft: var(--blue-soft); }
+.file-pane--drop-target { outline: 2px solid var(--pane-accent); outline-offset: -2px; }
+.file-pane--drop-target .file-list-container { background: var(--pane-soft); }
 .pane-heading { display: flex; align-items: center; gap: 10px; padding: 15px 16px 13px; min-height: 66px; flex-shrink: 0; }
 .pane-icon { width: 33px; height: 33px; border-radius: 7px; display: grid; place-items: center; flex-shrink: 0; }
 .pane-icon.local, .pane-icon.remote { color: var(--pane-accent); background: var(--pane-soft); }

@@ -13,6 +13,7 @@ import { useRemoteConnection } from "./lib/useRemoteConnection";
 import { useTransfers } from "./lib/useTransfers";
 import { TransferQueue } from "./components/TransferQueue";
 import { formatBytes } from "./lib/files";
+import { useTransferDrag } from "./lib/useTransferDrag";
 
 export default function App() {
   const [environment, setEnvironment] = useState<RuntimeEnvironment | null>(null);
@@ -73,6 +74,10 @@ export default function App() {
   }, [transfers.snapshot.revision, loading, listing, path, navigate, remote.loading, remote.listing, remote.path, remote.session, remote.navigate]);
   const transferReady = isDesktop && Boolean(remote.session && remote.listing && listing)
     && !remote.loading && !loading && !transfers.submitting;
+  const drag = useTransferDrag({
+    enabled: transferReady, sessionId: remote.session?.sessionId ?? null,
+    local: listing, remote: remote.listing, onTransfer: (requests) => { void transfers.enqueue(requests); },
+  });
   const rates = transfers.snapshot.jobs.reduce((value, job) => {
     if (job.state === "running") value[job.direction] += job.bytesPerSecond;
     return value;
@@ -144,7 +149,12 @@ export default function App() {
   }
 
   return (
-    <div className={`app-shell ${isDesktop ? "desktop-runtime" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`} data-active-pane={activePane}>
+    <div className={`app-shell ${isDesktop ? "desktop-runtime" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${mobileSidebarOpen ? "mobile-sidebar-open" : ""}`} data-active-pane={activePane}
+      onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "none"; }}
+      onDrop={(event) => {
+        event.preventDefault();
+        drag.clear();
+      }}>
       <header className="titlebar" data-tauri-drag-region>
         <div className="brand" data-tauri-drag-region><img src="/fileworker.svg" alt="" width={26} height={26} /><h1>FileWorker</h1></div>
         <span className="titlebar-divider" />
@@ -200,6 +210,7 @@ export default function App() {
                   sessionId: remote.session!.sessionId, direction: "upload", sourcePath: entry.path, destinationDir: remote.listing!.path,
                 })));
               }}
+              drag={drag.pane("local")}
               loading={loading} error={directoryError} preview={!isDesktop} onChooseDirectory={async () => {
                 try { const nextPath = await api.chooseDirectory(); if (nextPath) void navigate(nextPath); }
                 catch (cause) { setNotice(errorMessage(cause)); }
@@ -216,6 +227,7 @@ export default function App() {
                   sessionId: remote.session!.sessionId, direction: "download", sourcePath: entry.path, destinationDir: listing.path,
                 })));
               }}
+              drag={drag.pane("remote")}
               onMenu={() => setMenuOpen((value) => !value)} />
           </div>
           <TransferQueue snapshot={transfers.snapshot} sessionId={remote.session?.sessionId ?? null}

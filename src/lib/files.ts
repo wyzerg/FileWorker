@@ -1,5 +1,9 @@
 import type { FileEntry, SortDirection, SortKey } from "./types";
 
+export function isOrdinaryFile(entry: FileEntry): boolean {
+  return !entry.isDir && !entry.isSymlink;
+}
+
 export function visibleEntries(
   entries: FileEntry[],
   query: string,
