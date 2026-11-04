@@ -8,7 +8,8 @@ macOS 上已实现从 Finder 拖入普通文件到当前远程栏；Finder 拖�
 
 ## 项目状态
 
-项目处于开发阶段，目前提供源码，尚未发布可下载的正式 Release。
+项目处于开发阶段，目前提供源码和一个 macOS Apple Silicon 未签名实验性预发布；
+尚未发布可下载的正式 Release。预发布包不代表 Windows/Linux 或 Intel Mac 已支持。
 已验收平台为 macOS Apple Silicon；常规窗口、SFTP、按钮/双栏传输和开发版 `.app`
 已验收。Finder 原生拖入代码和浏览器边界测试已完成，但当前机器锁屏，真实 Finder
 拖入验收尚未完成。Windows、Linux 桌面和 Intel Mac 尚未验收。
@@ -16,7 +17,8 @@ macOS 上已实现从 Finder 拖入普通文件到当前远程栏；Finder 拖�
 
 后续继续完善系统文件管理器拖拽，再推进暂停/恢复和断点续传。
 公开下载的 macOS 安装包、构建自动化、签名与发布验收见
-[发布计划](docs/RELEASING.md)。该文档只是计划，不代表已有对应功能或 Release。
+[发布计划](docs/RELEASING.md)。当前预发布仍是未签名开发包，正式发行前还需完成
+原生 Finder 验收、签名、公证、安装升级和回退检查。
 
 ## 平台边界
 
@@ -311,7 +313,7 @@ macOS 原生窗口实测生成文件拖放上传、下载和同名保留两份�
 仓库跟踪 Rust/React/Tauri 源码、应用图标、测试、构建配置、依赖锁文件和设计文档。
 `Cargo.lock` 与 `pnpm-lock.yaml` 都需要保留，确保应用构建使用已锁定的依赖。
 不提交 `target/`、`dist/`、`node_modules/`、测试报告、IDE 状态、生成的 Tauri schema、
-本机连接配置、密码、私钥和临时传输文件。编译产物将来通过 GitHub Releases 分发，
+本机连接配置、密码、私钥和临时传输文件。编译产物通过 GitHub Releases 分发，
 不提交到源码分支。
 
 项目按 [MIT License](LICENSE) 许可发布，保留依赖自身的许可证要求。
