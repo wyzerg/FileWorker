@@ -73,6 +73,16 @@ fbf2497094dd96d31b39e49e61cde98d65bcbc472b3e152cf4fda0c895932529
 
 ## 下载后首次启动
 
-浏览器下载、Finder 解压与系统首次启动授权应单独验收；在实际完成前保留为待办。
-不得通过去除隔离标记、关闭系统整体检查，或直接启动开发目录内的程序替代该证据。
-需要用户本人确认的系统授权交由用户完成。
+- 浏览器下载：通过 Chrome 实际下载公开 `preview.3` ZIP，下载完成后大小为
+  5,241,185 字节，SHA-256 与 GitHub 附件摘要及上文新产物一致。
+- Finder 解压：在独立 `target/native-preview-signing-acceptance-*` 目录中，
+  通过 Finder 打开 ZIP，由归档实用工具生成 `FileWorker.app`，未覆盖用户原有下载副本。
+- 隔离属性：ZIP 与解压应用均保留 `com.apple.quarantine`，来源为 `Chrome`；
+  未去除隔离标记，未改变系统安全策略。
+- 下载应用校验：`codesign --verify --deep --strict --verbose=2` 返回 `valid on disk`、
+  `satisfies its Designated Requirement`；应用标识、ad-hoc 签名、Info.plist 绑定与
+  资源封装均符合上文。`spctl` 仍返回 `rejected`（退出码 `3`），不是信任通过。
+- 首次启动：尚未双击运行新下载应用，等待用户在执行前明确确认。系统可能要求
+  单独允许打开；如需系统授权或密码，由用户本人操作，不以本地构建启动替代。
+- 清理：仅暂留上述独立下载验收目录供首次启动继续验收，完成后删除本轮目录。
+  用户原有下载、应用及实际连接配置不属于清理对象。
