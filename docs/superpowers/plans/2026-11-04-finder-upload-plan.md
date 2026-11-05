@@ -55,9 +55,15 @@ Files: `src-tauri/src/finder_drop.rs`, `src-tauri/src/lib.rs`,
 - [x] Run real Finder multi-file upload and same-name keep-both on an unlocked
   Apple Silicon desktop using the published `v0.1.0-preview.1` package;
   verify source/destination SHA-256 and no temporary-file remnants.
-- [ ] Complete mixed invalid-batch native evidence with before/after queue and
-  remote-directory checks. A rejection notice was observed, but a regular source
-  had already been uploaded separately, so the full case remains unverified.
+- [x] Complete mixed invalid-batch native evidence using the unchanged published
+  `v0.1.0-preview.2` package and fresh files: file + directory and file + symlink
+  gestures are rejected with an empty queue, unchanged remote inventory, and no
+  server-side file operations. A separate real Finder positive control uploads
+  successfully with matching SHA-256 and confirms that server auditing works.
+  Remove generated files, keys, temporary HOME, environment, logs, and extracted
+  app; verify test processes/port are closed and real user configuration is unchanged.
+- [ ] Complete native Finder wrong-target acceptance; browser coverage alone is
+  not native evidence.
 - [ ] Verify Windows/Linux desktop build and native drag behavior before listing them
   as supported.
 
