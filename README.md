@@ -18,6 +18,8 @@ macOS Apple Silicon 实验性预发布；
 详见[原生验收记录](docs/acceptance/2026-11-05-native-transfers.md)。
 `v0.1.0-preview.5` 新增连接目录记忆、已存凭据双击直连、远程工具栏与右键操作，
 支持只读文件预览和受限的远程文件修改，详见[远程工作区验收](docs/acceptance/2026-11-05-remote-workspace.md)。
+`v0.1.0-preview.6` 补齐双栏工具栏对齐与远程多选批量删除，包含确认清单、逐项结果及仅重试失败项，
+详见[本次发布说明](docs/releases/v0.1.0-preview.6.md)。
 Windows、Linux 桌面和 Intel Mac 尚未验收。
 开发版 `.app` 未进行 Developer ID 签名与公证，不应当作正式发行版分发。
 
@@ -28,7 +30,7 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 
 ## macOS 预发布安装
 
-当前推荐 `v0.1.0-preview.5` 的 macOS Apple Silicon `.app.zip`，以及同名
+当前推荐 `v0.1.0-preview.6` 的 macOS Apple Silicon `.app.zip`，以及同名
 `.sha256` 文件。旧 `preview.1`、`preview.2` 缺少完整应用资源签名，浏览器下载后
 可能显示“已损坏”；保留历史产物，但不再推荐安装。
 
@@ -38,7 +40,7 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 1. 从本仓库 GitHub Releases 下载 ZIP 与校验文件，在下载目录执行：
 
    ```bash
-   shasum -a 256 -c FileWorker-v0.1.0-preview.5-macos-arm64.app.zip.sha256
+   shasum -a 256 -c FileWorker-v0.1.0-preview.6-macos-arm64.app.zip.sha256
    ```
 
 2. 校验成功后解压，将新包中的 `FileWorker.app` 放到应用程序目录。
@@ -54,6 +56,8 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 [签名修复验收记录](docs/acceptance/2026-11-05-macos-preview-signing.md)。
 `preview.5` 已校验归档和解压签名，并使用同一 ZIP 解压的应用完成原生工作区验收；
 尚未补做该版本的浏览器下载和 Gatekeeper 首次启动验收。
+`preview.6` 已校验归档与解压后的完整签名，批量删除通过行为及浏览器界面回归；
+本次没有重做真实原生批量删除、浏览器下载后的首次启动或安装升级验收。
 
 ## 平台边界
 
@@ -108,7 +112,7 @@ Windows/Linux 仍需完成本地路径与远程 POSIX 路径分离、构建入�
 
 ## 双栏工作区
 
-以下布局及批量删除为当前源码中的改进，公开的 `v0.1.0-preview.5` 尚未包含这些调整。
+以下布局及批量删除已包含在 `v0.1.0-preview.6`；旧 `preview.5` 不包含这些调整。
 
 本地与远程栏依次显示标题、路径、筛选、文件操作工具栏和文件列表，使用一致的行高。
 两侧表头与列表区域保持对齐，远程连接或断开不会改变列表起始位置。
@@ -406,7 +410,7 @@ macOS Apple Silicon 免费预发布构建与打包：
 ```bash
 bash scripts/run.sh tauri build --bundles app --ci -- --locked
 bash scripts/run.sh test:preview
-bash scripts/run.sh preview:package v0.1.0-preview.5
+bash scripts/run.sh preview:package v0.1.0-preview.6
 ```
 
 `bundle.macOS.signingIdentity` 为 `"-"`，由 Tauri 对可执行文件和完整 `.app`
@@ -433,7 +437,23 @@ cargo test -p fileworker-app keychain_roundtrip_and_delete_use_an_isolated_rando
 macOS，创建一个随机测试条目并在结束时清理。C AddressSanitizer 需实际对 C 依赖加
 `-fsanitize=address`，仅运行普通 Rust 测试不能替代；本轮编译与运行方式记录在第二阶段计划中。
 
-`v0.1.0-preview.5` 在 2026-11-05 完成的验证：
+`v0.1.0-preview.6` 在 2026-11-05 重新完成的验证：
+
+| 检查 | 结果 |
+| --- | --- |
+| 前端行为测试 | `211` 项通过，覆盖多选删除、部分失败重试与生命周期中断。 |
+| Playwright 界面测试 | `30` 项通过，含明暗、长清单、双栏对齐及窄、矮窗口。 |
+| 默认 Rust 工作区 | `68` 项通过；`32` 项真实协议与 `1` 项随机 Keychain 测试仍按默认规则跳过。 |
+| macOS 打包回归 | `11` 项通过。 |
+| 静态检查与构建 | 类型、格式、Clippy、锁定依赖的生产前端及 macOS arm64 优化构建通过。 |
+| 归档 | ZIP 完整性、SHA-256、解压后的应用签名、标识、基础版本与架构校验通过。 |
+
+本次不改后端协议、配置或凭据格式。未重跑隔离真实 SFTP、随机 Keychain、ASan
+或新包原生操作，不能把历史验收或浏览器夹具当作新包的完整原生验收。
+安装、浏览器首次启动与 Gatekeeper 授权边界仍见上文；实际验证范围与校验值见
+[preview.6 发布说明](docs/releases/v0.1.0-preview.6.md)。
+
+此前 `v0.1.0-preview.5` 在 2026-11-05 完成的验证：
 
 | 检查 | 结果 |
 | --- | --- |
