@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
-import { ArrowDown, ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUp, ArrowUpFromLine, ChevronDown, ChevronRight, Eye, EyeOff, File, FileArchive, FileCode2, FileImage, FileText, Folder, FolderOpen, HardDrive, Link2, LoaderCircle, Monitor, Pencil, PlugZap, Plus, RefreshCw, Search, Server, Unplug } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpFromLine, ChevronDown, ChevronRight, Eye, EyeOff, File, FileArchive, FileCode2, FileImage, FileText, Folder, FolderOpen, HardDrive, Link2, LoaderCircle, Monitor, Pencil, PlugZap, Plus, RefreshCw, Search, Server, Unplug } from "lucide-react";
 import type { ConnectionProfile, DirectoryListing, FileAction, FileEntry, SortDirection, SortKey } from "../lib/types";
 import { formatBytes, formatDate, isOrdinaryFile, visibleEntries } from "../lib/files";
 import { IconButton } from "./IconButton";
@@ -144,20 +144,21 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
         <IconButton label={`刷新${label}目录`} disabled={!navigable || loading} onClick={() => onNavigate?.(listing?.path ?? path)}>
           <RefreshCw size={16} className={loading ? "spinning" : ""} />
         </IconButton>
-        {local && <IconButton label="选择本地目录" onClick={onChooseDirectory} disabled={preview}><FolderOpen size={17} /></IconButton>}
       </div>
       <div className="pane-filter-row">
         <label className="search-field"><Search size={14} /><input aria-label={`筛选${label}文件`} value={query}
           onChange={(event) => setQuery(event.target.value)} placeholder="筛选文件" disabled={!listing} /></label>
         <IconButton label={showHidden ? "隐藏点文件" : "显示隐藏文件"} aria-pressed={showHidden} disabled={!listing}
           onClick={() => setShowHidden((value) => !value)}>{showHidden ? <Eye size={16} /> : <EyeOff size={16} />}</IconButton>
-        {local && <IconButton label="上传所选文件"
+      </div>
+      {local ? <div className="file-action-toolbar file-action-toolbar--local" role="toolbar" aria-label="本地文件操作">
+        <IconButton label="上传所选文件"
           disabled={!transferEnabled || preview || loading || !selectedEntries.length || selectedEntries.some((entry) => entry.isDir || entry.isSymlink)}
           onClick={() => onTransfer?.(selectedEntries)}>
-          {local ? <ArrowUpFromLine size={16} /> : <ArrowDownToLine size={16} />}
-        </IconButton>}
-      </div>
-      {!local && <RemoteFileToolbar {...actionOptions} />}
+          <ArrowUpFromLine size={16} />
+        </IconButton>
+        <IconButton label="选择本地目录" onClick={onChooseDirectory} disabled={preview}><FolderOpen size={16} /></IconButton>
+      </div> : <RemoteFileToolbar {...actionOptions} />}
       <div className="file-list-container" ref={dropRef} aria-busy={loading || undefined}
         onContextMenu={(event) => {
           event.preventDefault(); event.stopPropagation();

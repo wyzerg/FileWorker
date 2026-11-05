@@ -23,7 +23,10 @@ async function installFixture(page: Page) {
             case "list_profiles": return [profile];
             case "list_groups": return [];
             case "credential_status": return { available: true, supported: true };
-            case "list_local_directory": return { path: "/local", parentPath: "/", entries: [], warnings: [] };
+            case "list_local_directory": return { path: "/local", parentPath: "/", entries: [
+              { ...entry("packages", true), path: "/local/packages" },
+              { ...entry("本地文件说明.txt"), path: "/local/本地文件说明.txt" },
+            ], warnings: [] };
             case "transfer_snapshot": return { revision: 0, concurrency: 3, jobs: [] };
             case "probe_connection": return { attemptId: args.attemptId, host: profile.host, port: 22, trusted: true,
               identity: { algorithm: "ssh-ed25519", fingerprint: "SHA256:generated-only" } };
@@ -153,4 +156,59 @@ test("远程工具栏、右键与只读预览在明暗、矮窗和窄视口内�
     }
   }
   expect(errors).toEqual([]);
+});
+
+test("双栏的路径、筛选、工具栏、表头和列表逐行对齐，连接状态不改变布局", async ({ page }, testInfo) => {
+  await installFixture(page);
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    for (const viewport of [{ width: 1473, height: 895 }, { width: 1280, height: 820 }, { width: 800, height: 580 }, { width: 800, height: 480 }]) {
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      const local = page.getByRole("region", { name: "本地文件", exact: true });
+      const remote = page.getByRole("region", { name: "远程文件", exact: true });
+      await expect(local.getByText("本地文件说明.txt", { exact: true })).toBeVisible();
+      for (const connected of [false, true]) {
+        if (connected) {
+          await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+          await expect(remote.getByText("应用程序运行日志.log", { exact: true })).toBeVisible();
+        }
+        const localHeader = (await local.locator("th.column-name").boundingBox())!;
+        const remoteHeader = (await remote.locator("th.column-name").boundingBox())!;
+        expect(Math.abs(localHeader.y - remoteHeader.y), "两侧可见的文件表头应位于同一水平线").toBeLessThan(1);
+        for (const selector of [".pane-heading", ".pane-toolbar", ".pane-filter-row", '[role="toolbar"]', ".file-list-container", ".pane-footer"]) {
+          const left = (await local.locator(selector).boundingBox())!;
+          const right = (await remote.locator(selector).boundingBox())!;
+          expect(Math.abs(left.y - right.y), `${selector} 顶部应对齐`).toBeLessThan(1);
+          expect(Math.abs(left.height - right.height), `${selector} 高度应一致`).toBeLessThan(1);
+        }
+        await expect(local.getByRole("toolbar", { name: "本地文件操作" })).toBeVisible();
+        await expect(remote.getByRole("toolbar", { name: "远程文件操作" })).toBeVisible();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      }
+      await page.screenshot({ path: testInfo.outputPath(`${theme}-aligned-${viewport.width}-${viewport.height}.png`) });
+    }
+  }
+});
+
+test("窄视口切换本地和远程时，两侧工具栏保持完整且不溢出", async ({ page }, testInfo) => {
+  await installFixture(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  for (const side of ["本地", "远程"] as const) {
+    await page.getByRole("tab", { name: side, exact: true }).click();
+    const pane = page.getByRole("region", { name: `${side}文件`, exact: true });
+    const toolbar = pane.getByRole("toolbar", { name: `${side}文件操作` });
+    await expect(toolbar).toBeInViewport();
+    const bounds = (await toolbar.boundingBox())!;
+    for (const button of await toolbar.getByRole("button").all()) {
+      const buttonBounds = (await button.boundingBox())!;
+      expect(buttonBounds.x).toBeGreaterThanOrEqual(bounds.x);
+      expect(buttonBounds.x + buttonBounds.width).toBeLessThanOrEqual(bounds.x + bounds.width);
+      expect(buttonBounds.y).toBeGreaterThanOrEqual(bounds.y);
+      expect(buttonBounds.y + buttonBounds.height).toBeLessThanOrEqual(bounds.y + bounds.height);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    await page.screenshot({ path: testInfo.outputPath(`toolbar-mobile-${side === "本地" ? "local" : "remote"}.png`) });
+  }
 });

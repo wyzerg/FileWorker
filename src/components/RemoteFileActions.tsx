@@ -32,7 +32,7 @@ function disabled(action: FileAction, { entries, ready, mutationsBlocked, downlo
   return action !== "createDirectory" && (entries.length !== 1 || entries[0].isSymlink);
 }
 export function RemoteFileToolbar(options: ActionOptions) {
-  return <div className="remote-file-toolbar" role="toolbar" aria-label="远程文件操作">
+  return <div className="file-action-toolbar remote-file-toolbar" role="toolbar" aria-label="远程文件操作">
     {actions.map(({ id, label, Icon }) => <IconButton key={id} label={label} disabled={disabled(id, options)}
       onClick={() => options.onAction(id, options.entries)}><Icon size={16} /></IconButton>)}
   </div>;
