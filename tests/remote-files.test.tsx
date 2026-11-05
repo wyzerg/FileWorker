@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { FilePane } from "../src/components/FilePane";
 import { RemoteFileDialogs } from "../src/components/RemoteFileDialogs";
@@ -23,7 +23,7 @@ const listing: DirectoryListing = {
   entries: [entry("alpha.log"), entry("beta.txt"), entry("folder", { isDir: true }), entry("link", { isSymlink: true })],
 };
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   fixture.preview.mockResolvedValue({ kind: "text", path: "/remote/alpha.log", text: "<script>not executed</script>\n日志" });
   fixture.properties.mockResolvedValue({ path: "/remote/alpha.log", kind: "file", size: 5, modifiedMs: null, permissions: "0600", uid: 501, gid: 20 });
   fixture.mutate.mockResolvedValue(undefined);
@@ -61,6 +61,30 @@ it("right-click preserves a selected batch but targets an unselected row exactly
   fireEvent.contextMenu(screen.getByText("folder"));
   fireEvent.click(screen.getByRole("menuitem", { name: "重命名" }));
   expect(open).toHaveBeenLastCalledWith("rename", [listing.entries[2]]);
+});
+it("both deletion controls accept a selected batch without enabling other single-file actions", () => {
+  const open = vi.fn();
+  render(pane({ onFileAction: open }));
+  expect(screen.getByRole("button", { name: "删除" })).toBeDisabled();
+  fireEvent.click(screen.getByLabelText("选择 alpha.log"));
+  fireEvent.click(screen.getByLabelText("选择 beta.txt"));
+  expect(screen.getByRole("button", { name: "重命名" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "预览文件" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "属性" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "删除" }));
+  expect(open).toHaveBeenLastCalledWith("delete", listing.entries.slice(0, 2));
+  fireEvent.contextMenu(screen.getByText("alpha.log"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+  expect(open).toHaveBeenCalledTimes(2);
+  expect(open).toHaveBeenLastCalledWith("delete", listing.entries.slice(0, 2));
+});
+it("a selected symlink keeps batch deletion disabled in the toolbar and context menu", () => {
+  render(pane());
+  fireEvent.click(screen.getByText("alpha.log"));
+  fireEvent.click(screen.getByText("link"), { ctrlKey: true });
+  expect(screen.getByRole("button", { name: "删除" })).toBeDisabled();
+  fireEvent.contextMenu(screen.getByText("alpha.log"));
+  expect(screen.getByRole("menuitem", { name: "删除" })).toBeDisabled();
 });
 it("unfinished transfers disable all remote mutation controls but keep previews available", () => {
   render(pane({ mutationsBlocked: true }));
@@ -114,7 +138,7 @@ it("deletion requires confirmation, stays open on failure and refreshes only aft
   fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("目录非空");
   expect(refresh).not.toHaveBeenCalled();
-  fireEvent.click(within(dialog).getByRole("button", { name: "删除" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: /重试失败项/ }));
   await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   expect(fixture.mutate).toHaveBeenLastCalledWith("session-1", "/remote/folder", { kind: "delete" });
   expect(refresh).toHaveBeenCalledOnce();
@@ -162,4 +186,143 @@ it("a transfer starting while a mutation dialog is open blocks submission", asyn
   fireEvent.submit(screen.getByRole("dialog").querySelector("form")!);
   expect(fixture.mutate).not.toHaveBeenCalled();
   expect(screen.getByRole("alert")).toHaveTextContent("请先完成或取消");
+});
+
+function openBatch(names = ["alpha.log", "beta.txt"]) {
+  for (const name of names) fireEvent.click(screen.getByText(name), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText(names[0]));
+  fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+  return screen.getByRole("dialog", { name: "删除远程项目" });
+}
+it("batch deletion lists every full path and cancellation sends no mutation", () => {
+  render(<Harness />);
+  const dialog = openBatch();
+  const targets = within(dialog).getByRole("list", { name: "删除项目清单" });
+  expect(within(targets).getAllByRole("listitem")).toHaveLength(2);
+  expect(targets).toHaveTextContent("/remote/alpha.log");
+  expect(targets).toHaveTextContent("/remote/beta.txt");
+  expect(dialog).toHaveTextContent("共 2 项");
+  expect(dialog).toHaveTextContent("不会递归删除");
+  expect(fixture.mutate).not.toHaveBeenCalled();
+  fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(fixture.mutate).not.toHaveBeenCalled();
+});
+it("batch deletion runs sequentially, reports success and ignores repeated submission", async () => {
+  let finish!: () => void;
+  fixture.mutate.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+  const refresh = vi.fn();
+  render(<Harness refresh={refresh} />);
+  const dialog = openBatch();
+  const form = dialog.querySelector("form")!;
+  fireEvent.submit(form); fireEvent.submit(form);
+  expect(fixture.mutate.mock.calls).toEqual([["session-1", "/remote/alpha.log", { kind: "delete" }]]);
+  expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  expect(dialog).toBeInTheDocument();
+  await act(async () => { finish(); });
+  expect(fixture.mutate.mock.calls).toEqual([
+    ["session-1", "/remote/alpha.log", { kind: "delete" }],
+    ["session-1", "/remote/beta.txt", { kind: "delete" }],
+  ]);
+  expect(within(dialog).getByRole("status")).toHaveTextContent("已删除 2 项");
+  expect(within(dialog).getAllByText("已删除", { exact: true })).toHaveLength(2);
+  expect(refresh).toHaveBeenCalledExactlyOnceWith("/remote");
+  fireEvent.submit(form);
+  expect(fixture.mutate).toHaveBeenCalledTimes(2);
+  fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+it("a failed middle target does not stop the batch and retry never touches successful targets", async () => {
+  fixture.mutate.mockResolvedValueOnce(undefined).mockRejectedValueOnce({ code: "remote_file", message: "没有删除权限" })
+    .mockResolvedValueOnce(undefined);
+  const refresh = vi.fn();
+  render(<Harness refresh={refresh} />);
+  const dialog = openBatch(["alpha.log", "beta.txt", "folder"]);
+  fireEvent.submit(dialog.querySelector("form")!);
+  await waitFor(() => expect(within(dialog).getByRole("button", { name: /重试失败项/ })).toBeEnabled());
+  const rows = within(dialog).getAllByRole("listitem");
+  expect(rows[0]).toHaveTextContent("已删除");
+  expect(rows[1]).toHaveTextContent("删除失败");
+  expect(rows[1]).toHaveTextContent("没有删除权限");
+  expect(rows[2]).toHaveTextContent("已删除");
+  expect(within(dialog).getByRole("status")).toHaveTextContent("已删除 2 项");
+  expect(within(dialog).getByRole("status")).toHaveTextContent("失败 1 项");
+  expect(fixture.mutate.mock.calls).toEqual([
+    ["session-1", "/remote/folder", { kind: "delete" }],
+    ["session-1", "/remote/alpha.log", { kind: "delete" }],
+    ["session-1", "/remote/beta.txt", { kind: "delete" }],
+  ]);
+  expect(refresh).toHaveBeenCalledExactlyOnceWith("/remote");
+  fireEvent.click(within(dialog).getByRole("button", { name: /重试失败项/ }));
+  await waitFor(() => expect(within(dialog).getByRole("status")).toHaveTextContent("已删除 3 项"));
+  expect(fixture.mutate.mock.calls.slice(3)).toEqual([["session-1", "/remote/alpha.log", { kind: "delete" }]]);
+  expect(refresh).toHaveBeenCalledTimes(2);
+  expect(within(dialog).queryByRole("button", { name: /重试失败项/ })).not.toBeInTheDocument();
+});
+it.each(["session replacement", "unmount"])("a batch stops after %s without deleting remaining paths or refreshing", async (change) => {
+  let finish!: () => void;
+  fixture.mutate.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+  const refresh = vi.fn();
+  const view = render(<Harness refresh={refresh} />);
+  const dialog = openBatch();
+  fireEvent.submit(dialog.querySelector("form")!);
+  if (change === "unmount") view.unmount();
+  else view.rerender(<Harness sessionId="session-2" refresh={refresh} />);
+  await act(async () => { finish(); });
+  expect(fixture.mutate).toHaveBeenCalledExactlyOnceWith("session-1", "/remote/alpha.log", { kind: "delete" });
+  expect(refresh).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+it("a transfer starting between targets stops deletion and leaves only unfinished paths retryable", async () => {
+  let finish!: () => void;
+  fixture.mutate.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+  const refresh = vi.fn();
+  const view = render(<Harness refresh={refresh} />);
+  const dialog = openBatch();
+  fireEvent.submit(dialog.querySelector("form")!);
+  view.rerender(<Harness blocked refresh={refresh} />);
+  await act(async () => { finish(); });
+  expect(fixture.mutate).toHaveBeenCalledExactlyOnceWith("session-1", "/remote/alpha.log", { kind: "delete" });
+  expect(within(dialog).getByRole("alert")).toHaveTextContent("传输");
+  expect(within(dialog).getAllByRole("listitem")[1]).toHaveTextContent("未执行删除");
+  expect(refresh).toHaveBeenCalledExactlyOnceWith("/remote");
+  view.rerender(<Harness refresh={refresh} />);
+  fireEvent.click(within(dialog).getByRole("button", { name: /重试失败项/ }));
+  await waitFor(() => expect(within(dialog).getByRole("status")).toHaveTextContent("已删除 2 项"));
+  expect(fixture.mutate.mock.calls.slice(1)).toEqual([["session-1", "/remote/beta.txt", { kind: "delete" }]]);
+});
+it.each(["transfers_active", "remote_file_busy", "connection_lost", "session_closed"])(
+  "a native %s error stops the rest of the batch",
+  async (code) => {
+    fixture.mutate.mockRejectedValueOnce({ code, message: "原生操作已停止" });
+    const refresh = vi.fn(), sessionError = vi.fn();
+    const { result } = renderHook(() => useRemoteFiles({
+      sessionId: "session-1", listing, mutationsBlocked: false, onRefresh: refresh, onNotice: () => {}, onSessionError: sessionError,
+    }));
+    act(() => result.current.open("delete", listing.entries.slice(0, 2)));
+    await act(async () => { await result.current.submit(); });
+    expect(fixture.mutate).toHaveBeenCalledExactlyOnceWith("session-1", "/remote/alpha.log", { kind: "delete" });
+    expect(refresh).not.toHaveBeenCalled();
+    if (code === "connection_lost" || code === "session_closed") expect(sessionError).toHaveBeenCalledOnce();
+    else expect(sessionError).not.toHaveBeenCalled();
+    if (code === "connection_lost" || code === "session_closed") {
+      await act(async () => { await result.current.submit(); });
+      expect(fixture.mutate).toHaveBeenCalledTimes(1);
+    }
+  },
+);
+it("batch admission rejects empty, stale, mixed symlink and forged targets before any deletion", async () => {
+  const { result } = renderHook(() => useRemoteFiles({
+    sessionId: "session-1", listing, mutationsBlocked: false, onRefresh: () => {}, onNotice: () => {},
+  }));
+  for (const targets of [
+    [], [listing.entries[0], entry("missing")], [listing.entries[0], listing.entries[3]],
+    [listing.entries[0], { ...listing.entries[3], isSymlink: false }],
+  ]) {
+    act(() => result.current.open("delete", targets));
+    expect(result.current.dialog).toBeNull();
+    await act(async () => { await result.current.submit(); });
+  }
+  expect(fixture.mutate).not.toHaveBeenCalled();
 });

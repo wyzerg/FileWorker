@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
-async function installFixture(page: Page) {
-  await page.addInitScript(() => {
+async function installFixture(page: Page, options: { failDeleteOnce?: string; extraEntries?: number } = {}) {
+  await page.addInitScript((options) => {
     const profile = {
       id: "c83f782d-1334-40f3-9905-ed2f9c4ae61f", name: "测试环境应用服务器", host: "isolated.example.invalid",
       port: 22, username: "tester", authMethod: "password", privateKeyPath: null, remotePath: "/remote",
@@ -11,6 +11,9 @@ async function installFixture(page: Page) {
       modifiedMs: 1793836800000, hidden: false,
     });
     let entries = [entry("logs", true), entry("应用程序运行日志.log"), entry("status.png")];
+    entries.push(...Array.from({ length: options.extraEntries ?? 0 }, (_, index) =>
+      entry(`${String(index).padStart(2, "0")}_${"long_path_component_".repeat(9)}.log`)));
+    let deleteFailed = false;
     const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
     Object.assign(window, {
       isTauri: true, __remoteFilesFixture: { calls },
@@ -50,7 +53,13 @@ async function installFixture(page: Page) {
               const action = args.action as { kind: string; name?: string };
               if (action.kind === "createDirectory") entries = [...entries, entry(action.name!, true)];
               if (action.kind === "rename") entries = entries.map((item) => item.path === args.path ? entry(action.name!, item.isDir) : item);
-              if (action.kind === "delete") entries = entries.filter((item) => item.path !== args.path);
+              if (action.kind === "delete") {
+                if (!deleteFailed && args.path === options.failDeleteOnce) {
+                  deleteFailed = true;
+                  throw { code: "remote_file", message: "没有删除权限，请检查服务器上的文件权限。" };
+                }
+                entries = entries.filter((item) => item.path !== args.path);
+              }
               return;
             }
             case "disconnect_session":
@@ -61,8 +70,106 @@ async function installFixture(page: Page) {
         },
       },
     });
-  });
+  }, options);
 }
+
+async function deletionPaths(page: Page) {
+  return page.evaluate(() => (window as unknown as {
+    __remoteFilesFixture: { calls: Array<{ command: string; args: { path?: string; action?: { kind: string } } }> };
+  }).__remoteFilesFixture.calls.filter((call) => call.command === "mutate_remote_file" && call.args.action?.kind === "delete")
+    .map((call) => call.args.path));
+}
+
+test("多选右键和工具栏均能确认删除，取消不删除，全部成功后保留逐项结果", async ({ page }) => {
+  await installFixture(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+  const remote = page.getByRole("region", { name: "远程文件", exact: true });
+  await remote.getByRole("checkbox", { name: "选择全部远程文件" }).check();
+  await expect(remote.getByRole("button", { name: "重命名", exact: true })).toBeDisabled();
+  await remote.getByText("status.png", { exact: true }).click({ button: "right" });
+  await page.getByRole("menuitem", { name: "删除", exact: true }).click();
+  let dialog = page.getByRole("dialog", { name: "删除远程项目" });
+  await expect(dialog.getByRole("listitem")).toHaveCount(2);
+  await expect(dialog).toContainText("/remote/status.png");
+  await expect(dialog).toContainText("/remote/应用程序运行日志.log");
+  expect(await deletionPaths(page)).toEqual([]);
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  expect(await deletionPaths(page)).toEqual([]);
+  await remote.getByRole("button", { name: "删除", exact: true }).click();
+  dialog = page.getByRole("dialog", { name: "删除远程项目" });
+  await dialog.getByRole("button", { name: "删除 2 项", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText("已删除 2 项");
+  await expect(dialog.getByText("已删除", { exact: true })).toHaveCount(2);
+  expect(await deletionPaths(page)).toEqual(["/remote/应用程序运行日志.log", "/remote/status.png"]);
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(remote.locator("tbody tr")).toHaveCount(1);
+  await expect(remote.getByText("logs", { exact: true })).toBeVisible();
+  await expect(remote.getByRole("button", { name: "删除", exact: true })).toBeDisabled();
+});
+
+test("部分删除失败仍刷新列表，重试只提交失败路径，不重复删除成功项", async ({ page }) => {
+  await installFixture(page, { failDeleteOnce: "/remote/status.png" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+  const remote = page.getByRole("region", { name: "远程文件", exact: true });
+  await remote.getByRole("checkbox", { name: "选择全部远程文件" }).check();
+  await remote.getByRole("button", { name: "删除", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "删除远程项目" });
+  await dialog.getByRole("button", { name: "删除 2 项", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText("已删除 1 项");
+  await expect(dialog.getByRole("status")).toContainText("失败 1 项");
+  await expect(dialog.getByRole("listitem").filter({ hasText: "/remote/status.png" })).toContainText("没有删除权限");
+  const remoteRows = page.locator(".file-pane--remote tbody");
+  await expect(remoteRows.getByText("应用程序运行日志.log", { exact: true })).toHaveCount(0);
+  await expect(remoteRows.getByText("status.png", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: /重试失败项/ }).click();
+  await expect(dialog.getByRole("status")).toContainText("已删除 2 项");
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  expect(await deletionPaths(page)).toEqual(["/remote/应用程序运行日志.log", "/remote/status.png", "/remote/status.png"]);
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(remote.locator("tbody tr")).toHaveCount(1);
+});
+
+test("批量删除长路径清单和结果在明暗、窄窗及矮窗内可滚动且操作区完整", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await installFixture(page, { extraEntries: 18, failDeleteOnce: "/remote/status.png" });
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    for (const viewport of [{ width: 1473, height: 895 }, { width: 800, height: 480 }, { width: 390, height: 844 }, { width: 390, height: 480 }]) {
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      if (viewport.width < 760) await page.getByRole("tab", { name: "远程", exact: true }).click();
+      await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+      const remote = page.getByRole("region", { name: "远程文件", exact: true });
+      await remote.getByRole("checkbox", { name: "选择全部远程文件" }).check();
+      await remote.getByRole("button", { name: "删除", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "删除远程项目" });
+      await expect(dialog.getByRole("listitem")).toHaveCount(20);
+      const body = dialog.locator(".dialog-body");
+      expect(await body.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+      await expect(dialog.getByRole("button", { name: "删除 20 项", exact: true })).toBeInViewport();
+      await page.screenshot({ path: testInfo.outputPath(`${theme}-delete-confirm-${viewport.width}-${viewport.height}.png`) });
+      await body.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await expect(dialog.getByRole("listitem").last()).toBeInViewport();
+      await dialog.getByRole("button", { name: "删除 20 项", exact: true }).click();
+      await expect(dialog.getByRole("status")).toContainText("已删除 19 项");
+      await expect(dialog.getByRole("status")).toContainText("失败 1 项");
+      const retry = dialog.getByRole("button", { name: /重试失败项/ });
+      await expect(retry).toBeInViewport();
+      await expect(dialog.getByRole("button", { name: "关闭", exact: true })).toBeInViewport();
+      expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(await body.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      const buttonBounds = (await retry.boundingBox())!;
+      const dialogBounds = (await dialog.boundingBox())!;
+      expect(buttonBounds.y + buttonBounds.height).toBeLessThanOrEqual(dialogBounds.y + dialogBounds.height);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      await page.screenshot({ path: testInfo.outputPath(`${theme}-delete-results-${viewport.width}-${viewport.height}.png`) });
+    }
+  }
+  expect(errors).toEqual([]);
+});
 
 test("保存凭据直连、目录恢复、导航历史及文件修改形成完整流程", async ({ page }) => {
   await installFixture(page);

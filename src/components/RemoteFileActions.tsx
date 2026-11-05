@@ -29,6 +29,7 @@ function disabled(action: FileAction, { entries, ready, mutationsBlocked, downlo
   if (action === "download") return !downloadEnabled || !entries.length || !entries.every(isOrdinaryFile);
   if (action === "preview") return entries.length !== 1 || !isOrdinaryFile(entries[0]);
   if (mutationsBlocked) return true;
+  if (action === "delete") return !entries.length || entries.some((entry) => entry.isSymlink || entry.path === "/");
   return action !== "createDirectory" && (entries.length !== 1 || entries[0].isSymlink);
 }
 export function RemoteFileToolbar(options: ActionOptions) {
