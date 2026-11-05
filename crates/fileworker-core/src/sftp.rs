@@ -5,6 +5,7 @@ use crate::{
     profiles::{AuthMethod, ConnectionProfile},
     remote_path,
 };
+use serde::{Deserialize, Deserializer};
 use ssh2::{ErrorCode, HostKeyType, Session, Sftp};
 use std::{
     net::{Shutdown, TcpStream, ToSocketAddrs},
@@ -12,6 +13,38 @@ use std::{
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PrivateKeyEnvelope {
+    version: u32,
+    #[serde(deserialize_with = "deserialize_secret")]
+    private_key: Zeroizing<String>,
+    #[serde(deserialize_with = "deserialize_secret")]
+    passphrase: Zeroizing<String>,
+}
+
+impl PrivateKeyEnvelope {
+    fn parse(secret: &str) -> Result<Self, CoreError> {
+        let envelope: Self = serde_json::from_str(secret).map_err(|_| invalid_private_key())?;
+        if envelope.version != 1
+            || envelope.private_key.trim().is_empty()
+            || envelope.private_key.len() > 1024 * 1024
+            || envelope.private_key.contains('\0')
+            || envelope.passphrase.contains('\0')
+        {
+            return Err(invalid_private_key());
+        }
+        Ok(envelope)
+    }
+}
+
+fn deserialize_secret<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Zeroizing<String>, D::Error> {
+    String::deserialize(deserializer).map(Zeroizing::new)
+}
 
 pub(crate) struct SftpConnection {
     session: Session,
@@ -135,6 +168,15 @@ impl SftpConnection {
                     None,
                     &key,
                     (!secret.is_empty()).then_some(secret),
+                )
+            }
+            AuthMethod::PrivateKeyContent => {
+                let envelope = PrivateKeyEnvelope::parse(secret)?;
+                self.session.userauth_pubkey_memory(
+                    &self.profile.username,
+                    None,
+                    &envelope.private_key,
+                    (!envelope.passphrase.is_empty()).then_some(envelope.passphrase.as_str()),
                 )
             }
         };
@@ -285,4 +327,8 @@ fn directory_error(error: ssh2::Error) -> CoreError {
 
 fn connection_lost() -> CoreError {
     CoreError::new("connection_lost", "服务器连接已中断或超时，请重新连接")
+}
+
+fn invalid_private_key() -> CoreError {
+    CoreError::new("invalid_private_key", "粘贴的私钥内容格式无效，请重新粘贴")
 }

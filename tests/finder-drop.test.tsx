@@ -38,6 +38,8 @@ vi.mock("../src/lib/api", () => ({
       shortcuts: [], finderDrop: fixture.supported,
     }),
     listProfiles: async () => [profile],
+    listGroups: async () => [],
+    credentialStatus: async () => ({ available: false, supported: true }),
     listDirectory: (path: string | null) => fixture.local(path),
     listRemoteDirectory: (_session: string, path: string) => fixture.remote(path),
     probeConnection: async (_profile: string, attemptId: string) => ({

@@ -2,10 +2,11 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
-import type { ConnectionProfile, DirectoryListing } from "../src/lib/types";
+import type { ConnectionGroup, ConnectionProfile, DirectoryListing } from "../src/lib/types";
 
 const fixture = vi.hoisted(() => ({
   profiles: [] as ConnectionProfile[],
+  groups: [] as ConnectionGroup[],
   listDirectory: vi.fn(),
   getEnvironment: vi.fn(),
 }));
@@ -18,6 +19,16 @@ vi.mock("../src/lib/api", () => ({
     getEnvironment: (...args: unknown[]) => fixture.getEnvironment(...args),
     listDirectory: (...args: unknown[]) => fixture.listDirectory(...args),
     listProfiles: async () => [...fixture.profiles],
+    listGroups: async () => [...fixture.groups],
+    credentialStatus: async () => ({ available: false, supported: true }),
+    saveGroup: async (group: ConnectionGroup) => {
+      fixture.groups = [...fixture.groups.filter((item) => item.id !== group.id), group];
+      return group;
+    },
+    deleteGroup: async (id: string) => {
+      fixture.groups = fixture.groups.filter((group) => group.id !== id);
+      fixture.profiles = fixture.profiles.map((profile) => profile.groupId === id ? { ...profile, groupId: null } : profile);
+    },
     saveProfile: async (profile: ConnectionProfile) => {
       fixture.profiles = [...fixture.profiles.filter((item) => item.id !== profile.id), profile];
       return profile;
@@ -40,6 +51,7 @@ const home: DirectoryListing = {
 
 beforeEach(() => {
   fixture.profiles = [];
+  fixture.groups = [];
   fixture.listDirectory.mockReset().mockResolvedValue(home);
   fixture.getEnvironment.mockReset().mockResolvedValue({
     homePath: "/home/tester", runtime: "desktop",
@@ -75,11 +87,81 @@ describe("工作区", () => {
     await user.type(within(dialog).getByLabelText("连接名称"), "开发服务器");
     await user.type(within(dialog).getByLabelText("主机地址"), "dev.example.com");
     await user.type(within(dialog).getByLabelText("用户名"), "deploy");
-    await user.click(within(dialog).getByRole("button", { name: "保存连接" }));
+    await user.click(within(dialog).getByRole("button", { name: "仅保存配置" }));
     expect(await screen.findByRole("button", { name: /开发服务器/ })).toBeInTheDocument();
     expect(fixture.profiles).toHaveLength(1);
     expect(fixture.profiles[0]).not.toHaveProperty("password");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("可以新建、改名和删除分组，删除后连接移回未分组", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Projects");
+    await user.click(screen.getByRole("button", { name: "新建分组" }));
+    await user.type(screen.getByLabelText("分组名称"), "生产环境");
+    await user.click(screen.getByRole("button", { name: "保存分组" }));
+    const group = await screen.findByRole("group", { name: "生产环境" });
+    await user.click(within(group).getByRole("button", { name: "分组菜单" }));
+    await user.click(screen.getByRole("menuitem", { name: "新建连接" }));
+    expect(screen.getByLabelText("连接分组")).toHaveValue(fixture.groups[0].id);
+    await user.type(screen.getByLabelText("连接名称"), "生产一号");
+    await user.type(screen.getByLabelText("主机地址"), "prod.example.invalid");
+    await user.type(screen.getByLabelText("用户名"), "tester");
+    await user.click(screen.getByRole("button", { name: "仅保存配置" }));
+    expect(await within(group).findByRole("button", { name: /生产一号/ })).toBeInTheDocument();
+    await user.click(within(group).getByRole("button", { name: "分组菜单" }));
+    await user.click(screen.getByRole("menuitem", { name: "编辑分组" }));
+    await user.clear(screen.getByLabelText("分组名称"));
+    await user.type(screen.getByLabelText("分组名称"), "正式环境");
+    await user.click(screen.getByRole("button", { name: "保存分组" }));
+    const renamed = await screen.findByRole("group", { name: "正式环境" });
+    await user.click(within(renamed).getByRole("button", { name: "分组菜单" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除分组" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("不会删除连接");
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "删除分组" }));
+    expect(await within(screen.getByRole("navigation", { name: "已保存连接" })).findByRole("button", { name: /生产一号/ })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "正式环境" })).not.toBeInTheDocument();
+    expect(fixture.profiles).toHaveLength(1);
+    expect(fixture.profiles[0].groupId).toBeNull();
+  });
+
+  it("右键操作的连接不必是当前选中的连接", async () => {
+    const user = userEvent.setup();
+    const base: ConnectionProfile = {
+      id: "e6814610-8703-4c50-ab27-e823c8577fc3", name: "当前连接", host: "test.example.invalid",
+      port: 22, username: "tester", authMethod: "password", privateKeyPath: null, remotePath: ".",
+    };
+    fixture.profiles = [base, { ...base, id: "ee3b9e96-029c-44b6-9451-9828b3eb0052", name: "另一连接" }];
+    render(<App />);
+    const current = await screen.findByRole("button", { name: /当前连接.*test/ });
+    const other = screen.getByRole("button", { name: /另一连接.*test/ });
+    fireEvent.contextMenu(other, { clientX: 110, clientY: 250 });
+    expect(current).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("menuitem", { name: "编辑连接" }));
+    expect(screen.getByLabelText("连接名称")).toHaveValue("另一连接");
+    await user.click(screen.getByRole("button", { name: "关闭对话框" }));
+    fireEvent.contextMenu(other);
+    await user.click(screen.getByRole("menuitem", { name: "删除连接" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("另一连接");
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "删除连接" }));
+    expect(screen.queryByRole("button", { name: /另一连接.*test/ })).not.toBeInTheDocument();
+    expect(current).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("修改分组名称不会改变侧栏分组顺序", async () => {
+    fixture.groups = [{ id: "group-first", name: "生产" }, { id: "group-second", name: "测试" }];
+    const user = userEvent.setup();
+    render(<App />);
+    const first = await screen.findByRole("group", { name: "生产" });
+    await user.click(within(first).getByRole("button", { name: "分组菜单" }));
+    await user.click(screen.getByRole("menuitem", { name: "编辑分组" }));
+    await user.clear(screen.getByLabelText("分组名称"));
+    await user.type(screen.getByLabelText("分组名称"), "正式环境");
+    await user.click(screen.getByRole("button", { name: "保存分组" }));
+    const names = within(screen.getByRole("navigation", { name: "已保存连接" }))
+      .getAllByRole("group").map((element) => element.getAttribute("aria-label"));
+    expect(names).toEqual(["正式环境", "测试", "未分组"]);
   });
 
   it("延迟的环境初始化不会覆盖用户已经打开的目录", async () => {

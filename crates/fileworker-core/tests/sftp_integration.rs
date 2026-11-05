@@ -2,7 +2,8 @@ use fileworker_core::{
     connections::ConnectionManager,
     credentials::{CredentialStore, credential_account},
     error::CoreError,
-    profiles::{AuthMethod, ConnectionProfile},
+    profile_service::ProfileService,
+    profiles::{AuthMethod, ConnectionGroup, ConnectionProfile, ProfileStore},
     transfers::{
         ConflictPolicy, TransferDirection, TransferManager, TransferRequest, TransferState,
     },
@@ -56,6 +57,10 @@ impl CredentialStore for MemoryCredentials {
     fn delete(&self, account: &str) -> Result<(), CoreError> {
         self.values.lock().unwrap().remove(account);
         Ok(())
+    }
+
+    fn exists(&self, account: &str) -> Result<bool, CoreError> {
+        Ok(self.values.lock().unwrap().contains_key(account))
     }
 }
 
@@ -179,6 +184,7 @@ impl Server {
             auth_method: AuthMethod::Password,
             private_key_path: None,
             remote_path: ".".into(),
+            group_id: None,
         }
     }
 }
@@ -1144,7 +1150,7 @@ fn expiry_closes_the_socket_and_prevents_authentication_after_a_keychain_wait() 
 
 #[test]
 #[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
-fn forgetting_credentials_cannot_be_undone_by_a_canceled_in_flight_save() {
+fn forgetting_credentials_cancels_in_flight_saves_without_a_separate_cancel() {
     let fixture = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let server = Server::start(fixture.path(), 0, "host");
@@ -1166,7 +1172,6 @@ fn forgetting_credentials_cannot_be_undone_by_a_canceled_in_flight_save() {
         })
     };
     started.recv_timeout(Duration::from_secs(2)).unwrap();
-    manager.cancel(&attempt).unwrap();
     let (done, finished) = mpsc::channel();
     let forget = {
         let manager = manager.clone();
@@ -1434,6 +1439,7 @@ fn unresponsive_ssh_server_times_out_without_blocking_forever() {
         auth_method: AuthMethod::Password,
         private_key_path: None,
         remote_path: ".".into(),
+        group_id: None,
     };
     let start = std::time::Instant::now();
     assert!(manager.probe(id(), profile).is_err());
@@ -1478,6 +1484,7 @@ fn cancel_interrupts_an_in_progress_ssh_handshake() {
                     auth_method: AuthMethod::Password,
                     private_key_path: None,
                     remote_path: ".".into(),
+                    group_id: None,
                 },
             ));
         })
@@ -1493,4 +1500,531 @@ fn cancel_interrupts_an_in_progress_ssh_handshake() {
         "cancel should interrupt the socket instead of waiting for the network timeout"
     );
     assert!(outcome.unwrap().is_err());
+}
+
+fn pasted_profile(server: &Server) -> ConnectionProfile {
+    let mut profile = server.profile();
+    profile.id = id();
+    profile.auth_method = AuthMethod::PrivateKeyContent;
+    profile
+}
+
+fn pasted_secret(root: &Path, name: &str, passphrase: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "version": 1,
+        "privateKey": fs::read_to_string(root.join(name)).unwrap(),
+        "passphrase": passphrase
+    }))
+    .unwrap()
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn pasted_encrypted_and_plain_keys_remember_reconnect_and_transfer() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let credentials = Arc::new(MemoryCredentials::default());
+    let manager = Arc::new(ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        credentials.clone(),
+    ));
+    for (name, passphrase) in [
+        ("client.pem", "test-key-passphrase"),
+        ("client-ed25519", "test-ed25519-passphrase"),
+        ("client-plain", ""),
+    ] {
+        let profile = pasted_profile(&server);
+        let envelope = pasted_secret(fixture.path(), name, passphrase);
+        let attempt = id();
+        let probe = manager.probe(attempt.clone(), profile.clone()).unwrap();
+        assert!(!manager.credential_status(&profile).unwrap().available);
+        if !probe.trusted {
+            manager.trust(&attempt).unwrap();
+        }
+        let connected = manager
+            .authenticate(&attempt, secret(&envelope), true)
+            .unwrap();
+        assert!(connected.warning.is_none());
+        assert!(manager.credential_status(&profile).unwrap().available);
+        assert_eq!(manager.list(&connected.session_id, "/").unwrap().path, "/");
+        assert_eq!(
+            credentials
+                .values
+                .lock()
+                .unwrap()
+                .get(&credential_account(&profile)),
+            Some(&envelope)
+        );
+        let serialized = serde_json::to_string(&connected).unwrap();
+        assert!(!serialized.contains("PRIVATE KEY"));
+        assert!(!serialized.contains("privateKey"));
+        manager.disconnect(&connected.session_id).unwrap();
+
+        let attempt = id();
+        assert!(
+            manager
+                .probe(attempt.clone(), profile.clone())
+                .unwrap()
+                .trusted
+        );
+        let saved = manager.authenticate(&attempt, None, false).unwrap();
+        assert!(manager.credential_status(&profile).unwrap().available);
+        assert_eq!(manager.list(&saved.session_id, "/").unwrap().path, "/");
+        let downloads = tempfile::tempdir().unwrap();
+        let queue = TransferManager::new(manager.clone());
+        let jobs = queue
+            .enqueue(vec![transfer_request(
+                &saved.session_id,
+                "/hello.txt",
+                downloads.path().to_str().unwrap(),
+                false,
+            )])
+            .unwrap();
+        wait_for_job(&queue, &jobs[0], TransferState::Completed);
+        assert_eq!(
+            fs::read(downloads.path().join("hello.txt")).unwrap(),
+            b"hello"
+        );
+        manager.forget_credential(&profile).unwrap();
+        assert!(!manager.credential_status(&profile).unwrap().available);
+        assert_eq!(manager.list(&saved.session_id, "/").unwrap().path, "/");
+        manager.disconnect(&saved.session_id).unwrap();
+    }
+    for file in fs::read_dir(config.path()).unwrap() {
+        let bytes = fs::read(file.unwrap().path()).unwrap();
+        let content = String::from_utf8_lossy(&bytes);
+        assert!(!content.contains("PRIVATE KEY"));
+        assert!(!content.contains("test-key-passphrase"));
+        assert!(!content.contains("test-ed25519-passphrase"));
+    }
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn pasted_wrong_passphrases_retry_on_a_fresh_transport_without_saving_or_leaking() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let credentials = Arc::new(MemoryCredentials::default());
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        credentials.clone(),
+    );
+    for (name, passphrase) in [
+        ("client.pem", "test-key-passphrase"),
+        ("client-ed25519", "test-ed25519-passphrase"),
+    ] {
+        let profile = pasted_profile(&server);
+        let attempt = id();
+        let probe = manager.probe(attempt.clone(), profile.clone()).unwrap();
+        if !probe.trusted {
+            manager.trust(&attempt).unwrap();
+        }
+        let envelope = pasted_secret(fixture.path(), name, "sensitive-wrong-passphrase");
+        let error = manager
+            .authenticate(&attempt, secret(&envelope), true)
+            .unwrap_err();
+        assert_eq!(error.code, "authentication_failed");
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert!(!serialized.contains("sensitive-wrong-passphrase"));
+        assert!(!serialized.contains("PRIVATE KEY"));
+        assert!(!manager.credential_status(&profile).unwrap().available);
+        assert!(credentials.values.lock().unwrap().is_empty());
+        let connections = fs::read_to_string(fixture.path().join("connections"))
+            .unwrap()
+            .lines()
+            .count();
+        let envelope = pasted_secret(fixture.path(), name, passphrase);
+        let connected = manager
+            .authenticate(&attempt, secret(&envelope), false)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(fixture.path().join("connections"))
+                .unwrap()
+                .lines()
+                .count(),
+            connections + 1
+        );
+        assert_eq!(manager.list(&connected.session_id, "/").unwrap().path, "/");
+        manager.disconnect(&connected.session_id).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn pasted_key_envelopes_are_strict_bounded_and_retryable() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let credentials = Arc::new(MemoryCredentials::default());
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        credentials.clone(),
+    );
+    let profile = pasted_profile(&server);
+    let attempt = id();
+    manager.probe(attempt.clone(), profile).unwrap();
+    manager.trust(&attempt).unwrap();
+    let valid = pasted_secret(fixture.path(), "client.pem", "test-key-passphrase");
+    let valid_value: serde_json::Value = serde_json::from_str(&valid).unwrap();
+    let invalid_values = [
+        serde_json::json!({"version": 2, "privateKey": valid_value["privateKey"], "passphrase": "sensitive-passphrase"}),
+        serde_json::json!({"version": 1, "passphrase": "sensitive-passphrase"}),
+        serde_json::json!({"version": 1, "privateKey": "", "passphrase": ""}),
+        serde_json::json!({"version": 1, "privateKey": " \n ", "passphrase": ""}),
+        serde_json::json!({"version": 1, "privateKey": "K".repeat(1024 * 1024 + 1), "passphrase": ""}),
+        serde_json::json!({"version": 1, "privateKey": null, "passphrase": ""}),
+        serde_json::json!({"version": 1, "privateKey": valid_value["privateKey"], "passphrase": 17}),
+        serde_json::json!({"version": 1, "privateKey": valid_value["privateKey"]}),
+        serde_json::json!({"version": 1, "privateKey": valid_value["privateKey"], "passphrase": "", "password": "sensitive-passphrase"}),
+        serde_json::json!({"version": "1", "privateKey": valid_value["privateKey"], "passphrase": ""}),
+        serde_json::json!({"version": 1, "privateKey": "key\0sensitive-key", "passphrase": ""}),
+        serde_json::json!({"version": 1, "privateKey": valid_value["privateKey"], "passphrase": "sensitive-passphrase\0"}),
+    ];
+    let mut invalid_envelopes: Vec<String> = invalid_values
+        .iter()
+        .map(|value| serde_json::to_string(value).unwrap())
+        .collect();
+    invalid_envelopes.extend([
+        "malformed-sensitive-key".into(),
+        r#"{"version":1,"privateKey":"sensitive-key","privateKey":"duplicate","passphrase":""}"#
+            .into(),
+        format!("{valid} trailing-sensitive-key"),
+    ]);
+    for envelope in invalid_envelopes {
+        let error = manager
+            .authenticate(&attempt, secret(&envelope), true)
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_private_key");
+        let serialized = serde_json::to_string(&error).unwrap();
+        for sensitive in [
+            "sensitive-passphrase",
+            "sensitive-key",
+            "PRIVATE KEY",
+            "duplicate",
+        ] {
+            assert!(!serialized.contains(sensitive));
+        }
+        assert!(credentials.values.lock().unwrap().is_empty());
+        assert!(!fixture.path().join("auth-events").exists());
+    }
+    let exact_limit = serde_json::to_string(&serde_json::json!({
+        "version": 1, "privateKey": "K".repeat(1024 * 1024), "passphrase": ""
+    }))
+    .unwrap();
+    assert_eq!(
+        manager
+            .authenticate(&attempt, secret(&exact_limit), false)
+            .unwrap_err()
+            .code,
+        "authentication_failed"
+    );
+    let connected = manager
+        .authenticate(&attempt, secret(&valid), false)
+        .unwrap();
+    assert_eq!(manager.list(&connected.session_id, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn pasted_saved_credentials_are_not_read_or_sent_before_host_trust() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let credentials = Arc::new(MemoryCredentials::default());
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        credentials.clone(),
+    );
+    let profile = pasted_profile(&server);
+    let envelope = pasted_secret(fixture.path(), "client.pem", "test-key-passphrase");
+    credentials
+        .set(&credential_account(&profile), &envelope)
+        .unwrap();
+    let attempt = id();
+    assert!(
+        !manager
+            .probe(attempt.clone(), profile.clone())
+            .unwrap()
+            .trusted
+    );
+    assert!(manager.credential_status(&profile).unwrap().available);
+    for input in [None, secret(&envelope), secret("malformed-sensitive-key")] {
+        assert_eq!(
+            manager
+                .authenticate(&attempt, input, true)
+                .unwrap_err()
+                .code,
+            "host_not_trusted"
+        );
+    }
+    assert_eq!(credentials.reads.load(Ordering::SeqCst), 0);
+    assert!(!fixture.path().join("auth-events").exists());
+    assert!(!config.path().join("known_hosts.json").exists());
+    manager.trust(&attempt).unwrap();
+    let connected = manager.authenticate(&attempt, None, false).unwrap();
+    assert_eq!(manager.list(&connected.session_id, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn checks_in_a_separate_manager_preserve_the_live_session_and_transfers() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (live, session) = connected_manager(fixture.path(), config.path(), &server);
+    let test_manager = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+    );
+    let profile = pasted_profile(&server);
+    let attempt = id();
+    assert!(
+        test_manager
+            .probe(attempt.clone(), profile.clone())
+            .unwrap()
+            .trusted
+    );
+    assert!(!live.credential_status(&profile).unwrap().available);
+    assert_eq!(live.list(&session, "/").unwrap().path, "/");
+    assert_eq!(
+        test_manager
+            .authenticate(&attempt, secret("malformed-sensitive-key"), false)
+            .unwrap_err()
+            .code,
+        "invalid_private_key"
+    );
+    let wrong = pasted_secret(fixture.path(), "client.pem", "wrong-passphrase");
+    assert_eq!(
+        test_manager
+            .authenticate(&attempt, secret(&wrong), false)
+            .unwrap_err()
+            .code,
+        "authentication_failed"
+    );
+    let valid = pasted_secret(fixture.path(), "client.pem", "test-key-passphrase");
+    let checked = test_manager
+        .authenticate(&attempt, secret(&valid), false)
+        .unwrap();
+    assert_eq!(
+        test_manager.list(&checked.session_id, "/").unwrap().path,
+        "/"
+    );
+    test_manager.cancel(&attempt).unwrap();
+    assert!(live.is_session_active(&session));
+    assert_eq!(live.list(&session, "/").unwrap().path, "/");
+    let queue = TransferManager::new(live.clone());
+    let jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            "/hello.txt",
+            downloads.path().to_str().unwrap(),
+            false,
+        )])
+        .unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Completed);
+    assert_eq!(
+        fs::read(downloads.path().join("hello.txt")).unwrap(),
+        b"hello"
+    );
+    assert_eq!(live.list(&session, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn deleting_or_reidentifying_a_profile_cannot_leave_a_late_saved_credential() {
+    let fixture = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    for deleting in [true, false] {
+        let config = tempfile::tempdir().unwrap();
+        let (credentials, started, release) = BlockingCredentials::new(false);
+        let manager = Arc::new(ConnectionManager::new(
+            config.path().into(),
+            fixture.path().into(),
+            credentials.clone(),
+        ));
+        let service = Arc::new(ProfileService::new(
+            ProfileStore::new(config.path().into()),
+            manager.clone(),
+        ));
+        let profile = service.save(server.profile()).unwrap();
+        let attempt = id();
+        service.probe(&profile.id, attempt.clone()).unwrap();
+        manager.trust(&attempt).unwrap();
+        let auth = {
+            let manager = manager.clone();
+            std::thread::spawn(move || {
+                manager.authenticate(&attempt, secret("test-password-only"), true)
+            })
+        };
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (entered, waiting) = mpsc::channel();
+        let closed_before = fs::read_to_string(fixture.path().join("disconnect-events"))
+            .unwrap_or_default()
+            .lines()
+            .count();
+        let mutation = {
+            let service = service.clone();
+            let profile = profile.clone();
+            std::thread::spawn(move || {
+                entered.send(()).unwrap();
+                if deleting {
+                    service.delete(&profile.id)
+                } else {
+                    let mut changed = profile;
+                    changed.username = "changed-account".into();
+                    service.save(changed).map(|_| ())
+                }
+            })
+        };
+        waiting.recv_timeout(Duration::from_secs(1)).unwrap();
+        let canceled = wait_until(
+            || {
+                fs::read_to_string(fixture.path().join("disconnect-events"))
+                    .unwrap_or_default()
+                    .lines()
+                    .count()
+                    > closed_before
+            },
+            Duration::from_secs(1),
+        );
+        release.send(()).unwrap();
+        let result = auth.join().unwrap();
+        mutation.join().unwrap().unwrap();
+        assert!(
+            canceled,
+            "configuration mutation must cancel authentication before waiting for the vault"
+        );
+        assert_eq!(result.unwrap_err().code, "attempt_expired");
+        assert!(credentials.memory.values.lock().unwrap().is_empty());
+        let stored = service.store().list().unwrap();
+        if deleting {
+            assert!(stored.is_empty());
+            assert_eq!(
+                service.probe(&profile.id, id()).unwrap_err().code,
+                "profile_missing"
+            );
+        } else {
+            assert_eq!(stored[0].username, "changed-account");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
+fn rename_group_changes_and_forgetting_preserve_a_live_session_but_identity_changes_close_it() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let credentials = Arc::new(MemoryCredentials::default());
+    let manager = Arc::new(ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        credentials.clone(),
+    ));
+    let service = ProfileService::new(ProfileStore::new(config.path().into()), manager.clone());
+    let mut profile = service.save(server.profile()).unwrap();
+    let attempt = id();
+    service.probe(&profile.id, attempt.clone()).unwrap();
+    manager.trust(&attempt).unwrap();
+    let session = manager
+        .authenticate(&attempt, secret("test-password-only"), true)
+        .unwrap();
+    let group = service
+        .store()
+        .save_group(ConnectionGroup {
+            id: id(),
+            name: "生产".into(),
+        })
+        .unwrap();
+    profile.name = "重命名".into();
+    profile.group_id = Some(group.id.clone());
+    profile.remote_path = "/".into();
+    profile = service.save(profile).unwrap();
+    service.store().delete_group(&group.id).unwrap();
+    assert!(manager.credential_status(&profile).unwrap().available);
+    service.forget_credential(&profile.id).unwrap();
+    assert!(credentials.values.lock().unwrap().is_empty());
+    assert!(
+        !manager
+            .list(&session.session_id, "/")
+            .unwrap()
+            .path
+            .is_empty()
+    );
+    profile.group_id = None;
+    profile.username = "changed-account".into();
+    service.save(profile).unwrap();
+    assert_eq!(
+        manager.list(&session.session_id, "/").unwrap_err().code,
+        "session_closed"
+    );
+}
+
+#[test]
+fn deleting_a_profile_interrupts_its_pending_handshake_and_prevents_stale_reprobes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = tempfile::tempdir().unwrap();
+    let manager = Arc::new(ConnectionManager::with_timeouts(
+        config.path().into(),
+        config.path().into(),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_secs(3),
+        Duration::from_secs(120),
+    ));
+    let service = Arc::new(ProfileService::new(
+        ProfileStore::new(config.path().into()),
+        manager,
+    ));
+    let profile = service
+        .save(ConnectionProfile {
+            id: id(),
+            name: "handshake".into(),
+            host: "127.0.0.1".into(),
+            port,
+            username: "tester".into(),
+            auth_method: AuthMethod::Password,
+            private_key_path: None,
+            remote_path: ".".into(),
+            group_id: None,
+        })
+        .unwrap();
+    let (accepted, received) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        accepted.send(()).unwrap();
+        let _ = wait.recv_timeout(Duration::from_secs(5));
+        drop(socket);
+    });
+    let probe = {
+        let service = service.clone();
+        let profile_id = profile.id.clone();
+        std::thread::spawn(move || service.probe(&profile_id, id()))
+    };
+    received.recv_timeout(Duration::from_secs(2)).unwrap();
+    let start = Instant::now();
+    let result = service.delete(&profile.id);
+    let elapsed = start.elapsed();
+    release.send(()).unwrap();
+    server.join().unwrap();
+    let probe = probe.join().unwrap();
+    result.unwrap();
+    assert!(probe.is_err());
+    assert!(
+        elapsed < Duration::from_millis(600),
+        "deletion must cancel the network wait"
+    );
+    assert_eq!(
+        service.probe(&profile.id, id()).unwrap_err().code,
+        "profile_missing"
+    );
 }

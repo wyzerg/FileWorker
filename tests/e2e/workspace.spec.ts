@@ -9,7 +9,7 @@ test("连接配置可以保存、重载、编辑、复制和删除", async ({ pa
   await dialog.getByLabel("连接名称").fill("开发服务器");
   await dialog.getByLabel("主机地址").fill("dev.example.com");
   await dialog.getByLabel("用户名").fill("deploy");
-  await dialog.getByRole("button", { name: "保存连接" }).click();
+  await dialog.getByRole("button", { name: "仅保存配置" }).click();
   await expect(page.getByRole("button", { name: /开发服务器/ })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("button", { name: /开发服务器/ })).toBeVisible();
@@ -17,7 +17,7 @@ test("连接配置可以保存、重载、编辑、复制和删除", async ({ pa
   await page.getByRole("button", { name: "管理当前连接" }).click();
   await page.getByRole("menuitem", { name: "编辑连接" }).click();
   await page.getByLabel("连接名称").fill("测试服务器");
-  await page.getByRole("button", { name: "保存连接" }).click();
+  await page.getByRole("button", { name: "仅保存配置" }).click();
   await expect(page.getByRole("button", { name: /测试服务器/ })).toBeVisible();
 
   await page.getByRole("button", { name: "管理当前连接" }).click();

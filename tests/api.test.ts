@@ -54,4 +54,24 @@ describe("浏览器预览存储", () => {
     await api.saveProfile(profile);
     expect(await api.listProfiles()).toEqual([profile]);
   });
+
+  it("编辑连接后保持原有顺序，重载与原生配置行为一致", async () => {
+    const second = { ...profile, id: "f9fd9ec9-642f-454c-9cb1-fbc8c9b4e6b1", name: "第二个" };
+    await api.saveProfile(profile);
+    await api.saveProfile(second);
+    await api.saveProfile({ ...profile, name: "修改后" });
+    expect((await api.listProfiles()).map((item) => item.name)).toEqual(["修改后", "第二个"]);
+  });
+
+  it("分组删除后连接保留并移回未分组，旧连接预览数据仍可读取", async () => {
+    localStorage.setItem(key, JSON.stringify([profile]));
+    const group = { id: "f9fd9ec9-642f-454c-9cb1-fbc8c9b4e6b1", name: "生产环境" };
+    await api.saveGroup(group);
+    await api.saveProfile({ ...profile, groupId: group.id });
+    expect(await api.listGroups()).toEqual([group]);
+    expect((await api.listProfiles())[0].groupId).toBe(group.id);
+    await api.deleteGroup(group.id);
+    expect(await api.listGroups()).toEqual([]);
+    expect(await api.listProfiles()).toEqual([{ ...profile, groupId: null }]);
+  });
 });

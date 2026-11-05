@@ -1,7 +1,8 @@
 # FileWorker 发布计划
 
-当前推荐 `v0.1.0-preview.3` macOS Apple Silicon 实验性预发布，
-补齐完整应用 ad-hoc 签名与打包校验。旧 `preview.1`、`preview.2` 仅有链接器签名，
+当前推荐 `v0.1.0-preview.4` macOS Apple Silicon 实验性预发布，
+新增连接管理、可选分组和直接认证，沿用 `preview.3` 的完整应用 ad-hoc 签名与打包校验。
+旧 `preview.1`、`preview.2` 仅有链接器签名，
 缺少完整资源封装，浏览器下载后可能显示“已损坏”；保留原标签和附件，不推荐继续安装。
 尚无正式 Release；预发布包未使用 Apple Developer ID 分发签名、未公证，不能视为稳定发行版。
 
@@ -17,7 +18,8 @@
    不将浏览器拖拽测试当作原生验收，详见 `docs/acceptance/2026-11-05-native-transfers.md`。
 3. 设计并验证暂停/恢复、续传元数据和异常退出后的恢复；在完成前仍明确标为不支持。
 4. `v0.1.0-preview.2` 已提供同名自动弹框。`v0.1.0-preview.3` 修正签名封装，
-   以新标签提供优化 `.app.zip` 和 SHA-256；不替换旧标签或产物。
+   `v0.1.0-preview.4` 完善连接分组、认证、测试和配置迁移；
+   均以新标签提供优化 `.app.zip` 和 SHA-256，不替换旧标签或产物。
    免费 ad-hoc 签名不等于 Developer ID 分发签名或公证，仍可能需要单独允许打开。
 5. 建立独立于发布权限的持续集成；安装、升级、签名、公证与安全验收通过后，才确定
    首个正式版本。
@@ -50,7 +52,7 @@ Intel Mac 需单独构建并验收后再列为支持；Windows/Linux 不在首�
 ```bash
 bash scripts/run.sh tauri build --bundles app --ci -- --locked
 bash scripts/run.sh test:preview
-bash scripts/run.sh preview:package v0.1.0-preview.3
+bash scripts/run.sh preview:package v0.1.0-preview.4
 ```
 
 Tauri 配置显式使用 `bundle.macOS.signingIdentity: "-"`，不是只依赖链接器签名。
@@ -81,6 +83,20 @@ Tauri 配置显式使用 `bundle.macOS.signingIdentity: "-"`，不是只依赖�
 未使用 Developer ID 签名、未公证的测试包必须明确标为实验性预发布，不能宣称没有
 系统安全提示。
 当前只使用免费 ad-hoc 签名，不新增证书、密钥、账户配置或自动更新服务。
+
+## preview.4 验收
+
+`161` 项前端、`23` 项 Playwright、`93` 项完整 Rust 工作区测试（含真实协议和
+隔离 Keychain）、C AddressSanitizer 下 `31` 项协议测试，以及 `11` 项打包回归通过；
+类型、格式、Clippy、生产前端和优化 `.app` 构建通过。
+同一发布 ZIP 解压应用完成原生密码、加密私钥文件、粘贴私钥、密码保存重连、
+分组折叠持久化和标题栏拖动；本轮测试环境及凭据已清理。
+完整范围见 `docs/acceptance/2026-11-05-connection-management.md`。
+
+升级首次修改配置会生成 v1 备份再写入 v2。回退前须退出并保留现用 v2 文档，
+再从 `profiles.v1.backup.json` 恢复；旧版不能直接读取 v2，备份不包含迁移后的改动。
+下载首次启动、系统授权、最低系统、安装升级回退和其他平台仍需专门验收，
+不能由本轮连接测试替代。先前 `preview.3` 下载验收目录保留供用户完成首次启动。
 
 ## 首次发布检查
 

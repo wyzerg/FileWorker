@@ -24,6 +24,8 @@ vi.mock("../src/lib/api", () => ({
     enqueueTransfers: (...args: unknown[]) => fixture.enqueue(...args),
     getEnvironment: async () => ({ homePath: "/local", runtime: "desktop", shortcuts: [] }),
     listProfiles: async () => [profile],
+    listGroups: async () => [],
+    credentialStatus: async () => ({ available: false, supported: true }),
     listDirectory: (...args: unknown[]) => fixture.listLocal(...args),
     probeConnection: (...args: unknown[]) => fixture.probe(...args),
     trustConnection: (...args: unknown[]) => fixture.trust(...args),
@@ -211,6 +213,7 @@ it("错误密码保持认证表单，目录错误不伪装成空目录", async (
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "连接" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("密码不正确");
   expect(screen.getByRole("dialog")).toBeInTheDocument();
+  await user.clear(screen.getByLabelText("密码"));
   await user.type(screen.getByLabelText("密码"), "test-password");
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "连接" }));
   await screen.findByText("remote-folder");
@@ -219,6 +222,31 @@ it("错误密码保持认证表单，目录错误不伪装成空目录", async (
   fireEvent.submit(path.closest("form")!);
   expect(await screen.findByRole("alert")).toHaveTextContent("没有读取权限");
   expect(screen.getByRole("button", { name: "断开服务器" })).toBeInTheDocument();
+});
+
+it("重命名或移动分组不会断开已建立的会话", async () => {
+  fixture.trusted = true;
+  const { result, rerender } = renderHook(({ selectedProfile }) => useRemoteConnection(selectedProfile, () => {}), {
+    initialProps: { selectedProfile: profile },
+  });
+  await act(async () => { await result.current.connect(); });
+  await act(async () => { await result.current.authenticate("test-password", false); });
+  expect(result.current.session?.sessionId).toBe("session-1");
+  rerender({ selectedProfile: { ...profile, name: "改名", groupId: "f9fd9ec9-642f-454c-9cb1-fbc8c9b4e6b1" } });
+  expect(result.current.session?.sessionId).toBe("session-1");
+  expect(fixture.disconnect).not.toHaveBeenCalled();
+});
+
+it("表单中的临时凭据在信任指纹后直接认证，不再要求重复输入", async () => {
+  const { result } = renderHook(() => useRemoteConnection(profile, () => {}));
+  await act(async () => {
+    await result.current.connect({ secret: "test-password", privateKeyContent: null, remember: true });
+  });
+  expect(result.current.attempt?.phase).toBe("trust");
+  expect(fixture.authenticate).not.toHaveBeenCalled();
+  await act(async () => { await result.current.trust(); });
+  expect(result.current.session?.sessionId).toBe("session-1");
+  expect(fixture.authenticate).toHaveBeenCalledWith(expect.any(String), "test-password", true, null);
 });
 
 it("握手取消后晚到的响应不会重新打开认证表单", async () => {

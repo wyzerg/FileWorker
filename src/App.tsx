@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, ArrowRightLeft, ArrowUpFromLine, CircleCheck, Copy, KeyRound, LoaderCircle, MoreHorizontal, PanelLeft, Pencil, PlugZap, Plus, Trash2, Unplug, X } from "lucide-react";
+import { ArrowDownToLine, ArrowRightLeft, ArrowUpFromLine, CircleCheck, LoaderCircle, MoreHorizontal, PanelLeft, PlugZap, Plus, Trash2, Unplug, X } from "lucide-react";
 import { api, errorMessage, isDesktop } from "./lib/api";
-import type { ConnectionProfile, DirectoryListing, RuntimeEnvironment } from "./lib/types";
+import type { AuthenticationInput, ConnectionGroup, ConnectionProfile, DirectoryListing, RuntimeEnvironment } from "./lib/types";
 import { Dialog } from "./components/Dialog";
 import { FilePane } from "./components/FilePane";
 import { IconButton } from "./components/IconButton";
@@ -15,10 +15,14 @@ import { TransferQueue } from "./components/TransferQueue";
 import { formatBytes } from "./lib/files";
 import { useTransferDrag } from "./lib/useTransferDrag";
 import { useFinderDrop } from "./lib/useFinderDrop";
+import { GroupDialog } from "./components/GroupDialog";
+import { ProfileMenu } from "./components/ProfileMenu";
+import { credentialIdentity } from "./lib/useAuthentication";
 
 export default function App() {
   const [environment, setEnvironment] = useState<RuntimeEnvironment | null>(null);
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
+  const [groups, setGroups] = useState<ConnectionGroup[]>([]);
   const [profilesLoading, setProfilesLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [listing, setListing] = useState<DirectoryListing | null>(null);
@@ -26,18 +30,29 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [directoryError, setDirectoryError] = useState("");
   const [notice, setNotice] = useState("");
-  const [editor, setEditor] = useState<{ profile: ConnectionProfile | null } | null>(null);
+  const [editor, setEditor] = useState<{ profile: ConnectionProfile | null; groupId?: string | null } | null>(null);
+  const [groupEditor, setGroupEditor] = useState<{ group: ConnectionGroup | null } | null>(null);
+  const [deleteGroupTarget, setDeleteGroupTarget] = useState<ConnectionGroup | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ConnectionProfile | null>(null);
   const [mutationBusy, setMutationBusy] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [mutationError, setMutationError] = useState("");
+  const [profileMenu, setProfileMenu] = useState<{ profile: ConnectionProfile; anchor: { x: number; y: number }; trigger?: HTMLElement | null } | null>(null);
+  const [connectionRequest, setConnectionRequest] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [activePane, setActivePane] = useState("local");
   const requestId = useRef(0);
   const completedTargets = useRef({ local: new Set<string>(), remote: new Set<string>() });
-  const menu = useRef<HTMLDivElement>(null);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
+  const pendingConnection = useRef<{ id: string; input?: AuthenticationInput } | null>(null);
   const selectedProfile = profiles.find((profile) => profile.id === selectedId) ?? null;
   const remote = useRemoteConnection(selectedProfile, setNotice);
+  useEffect(() => {
+    const pending = pendingConnection.current;
+    if (!pending || editor || selectedProfile?.id !== pending.id) return;
+    pendingConnection.current = null;
+    void remote.connect(pending.input);
+  }, [connectionRequest, selectedProfile, editor]);
 
   const navigate = useCallback(async (nextPath: string | null) => {
     const current = ++requestId.current;
@@ -81,7 +96,7 @@ export default function App() {
   });
   const finderDrop = useFinderDrop({
     available: isDesktop && environment?.finderDrop === true,
-    enabled: transferReady && !editor && !deleteTarget && !remote.attempt,
+    enabled: transferReady && !editor && !groupEditor && !deleteTarget && !deleteGroupTarget && !remote.attempt,
     sessionId: remote.session?.sessionId ?? null, local: listing, remote: remote.listing,
     onUpload: (paths, sessionId, destinationDir) => { void transfers.enqueueFinder(paths, sessionId, destinationDir); },
     onInternalDragClear: drag.clear, onNotice: setNotice,
@@ -99,61 +114,88 @@ export default function App() {
       setEnvironment(result);
       if (result.runtime === "desktop" && requestId.current === initialRequest) void navigate(null);
     }).catch((cause) => { if (active) setNotice(errorMessage(cause)); });
-    api.listProfiles().then((result) => {
+    Promise.all([api.listProfiles(), api.listGroups()]).then(([result, connectionGroups]) => {
       if (!active) return;
-      setProfiles(result);
+      setProfiles(result); setGroups(connectionGroups);
       setSelectedId((id) => id ?? result[0]?.id ?? null);
     }).catch((cause) => { if (active) setNotice(errorMessage(cause)); })
       .finally(() => { if (active) setProfilesLoading(false); });
     return () => { active = false; requestId.current += 1; };
   }, [navigate]);
 
-  useEffect(() => {
-    if (!menuOpen) return;
-    const outside = (event: MouseEvent) => {
-      if (!menu.current?.contains(event.target as Node)) setMenuOpen(false);
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", outside);
-    document.addEventListener("keydown", escape);
-    return () => {
-      document.removeEventListener("mousedown", outside);
-      document.removeEventListener("keydown", escape);
-    };
-  }, [menuOpen]);
-
-  const newProfile = () => {
-    if (!profilesLoading) { setNotice(""); setEditor({ profile: null }); }
+  const newProfile = (groupId?: string | null) => {
+    if (!profilesLoading) { setNotice(""); setProfileMenu(null); setEditor({ profile: null, groupId }); }
   };
-  async function saveProfile(profile: ConnectionProfile) {
+  const hasActiveTransfers = Boolean(remote.session && transfers.snapshot.jobs.some((job) =>
+    job.sessionId === remote.session!.sessionId && ["queued", "running", "canceling", "conflict"].includes(job.state)));
+  const transferWarning = "当前连接仍有未结束的传输，请先完成或取消任务，再断开或切换连接";
+  function selectProfile(id: string) {
+    if (id !== selectedId && hasActiveTransfers) { setNotice(transferWarning); return; }
+    setSelectedId(id); setMobileSidebarOpen(false); setActivePane("remote");
+  }
+  function requestConnect(id: string, input?: AuthenticationInput) {
+    if (hasActiveTransfers) { setNotice(transferWarning); return; }
+    remote.cancel();
+    pendingConnection.current = { id, input };
+    setSelectedId(id); setConnectionRequest((value) => value + 1);
+    setActivePane("remote"); setMobileSidebarOpen(false);
+  }
+  async function saveProfile(profile: ConnectionProfile, input?: AuthenticationInput, connect = false) {
+    const changesActiveIdentity = selectedProfile?.id === profile.id && credentialIdentity(selectedProfile) !== credentialIdentity(profile);
+    if (hasActiveTransfers && (connect || changesActiveIdentity)) throw new Error(transferWarning);
     const saved = await api.saveProfile(profile);
     setProfiles((previous) => {
       const index = previous.findIndex((item) => item.id === saved.id);
       return index === -1 ? [...previous, saved] : previous.map((item) => item.id === saved.id ? saved : item);
     });
-    setSelectedId(saved.id); setNotice("");
+    if (connect && isDesktop) requestConnect(saved.id, input);
+    else if (!remote.session && !remote.attempt) setSelectedId(saved.id);
+    setNotice(connect && !isDesktop ? "配置已保存；连接服务器请使用桌面应用" : "连接配置已保存");
   }
-  async function duplicateProfile() {
-    if (!selectedProfile || mutationBusy) return;
-    setMenuOpen(false); setMutationBusy(true);
+  async function duplicateProfile(profile: ConnectionProfile) {
+    if (mutationBusy) return;
+    setMutationBusy(true);
     try {
-      await saveProfile({ ...selectedProfile, id: crypto.randomUUID(), name: `${selectedProfile.name} 副本` });
+      await saveProfile({ ...profile, id: crypto.randomUUID(), name: `${profile.name} 副本` });
     } catch (cause) { setNotice(errorMessage(cause)); }
     finally { setMutationBusy(false); }
   }
   async function deleteProfile() {
     if (!deleteTarget || mutationBusy) return;
-    setMutationBusy(true);
+    if (deleteTarget.id === remote.session?.profileId && hasActiveTransfers) { setMutationError(transferWarning); return; }
+    setMutationBusy(true); setMutationError("");
     try {
       await api.deleteProfile(deleteTarget.id);
       const remaining = profiles.filter((profile) => profile.id !== deleteTarget.id);
       setProfiles(remaining);
       if (selectedId === deleteTarget.id) setSelectedId(remaining[0]?.id ?? null);
       setDeleteTarget(null); setNotice("");
-    } catch (cause) { setNotice(errorMessage(cause)); }
+    } catch (cause) { setMutationError(errorMessage(cause)); }
     finally { setMutationBusy(false); }
+  }
+  async function saveGroup(group: ConnectionGroup) {
+    const saved = await api.saveGroup(group);
+    setGroups((previous) => previous.some((item) => item.id === saved.id)
+      ? previous.map((item) => item.id === saved.id ? saved : item) : [...previous, saved]);
+  }
+  async function deleteGroup() {
+    if (!deleteGroupTarget || mutationBusy) return;
+    setMutationBusy(true); setMutationError("");
+    try {
+      const id = deleteGroupTarget.id;
+      await api.deleteGroup(id);
+      setGroups((previous) => previous.filter((item) => item.id !== id));
+      setProfiles((previous) => previous.map((profile) => profile.groupId === id ? { ...profile, groupId: null } : profile));
+      setDeleteGroupTarget(null);
+    } catch (cause) { setMutationError(errorMessage(cause)); }
+    finally { setMutationBusy(false); }
+  }
+  const closeProfileMenu = useCallback(() => setProfileMenu(null), []);
+  function openCurrentMenu() {
+    if (!selectedProfile) return;
+    if (profileMenu) { setProfileMenu(null); return; }
+    const bounds = menuTrigger.current?.getBoundingClientRect();
+    setProfileMenu({ profile: selectedProfile, anchor: { x: bounds?.left ?? 16, y: bounds?.bottom ?? 100 }, trigger: menuTrigger.current });
   }
 
   return (
@@ -164,11 +206,11 @@ export default function App() {
         drag.clear();
       }}>
       <header className="titlebar" data-tauri-drag-region>
-        <div className="brand" data-tauri-drag-region><img src="/fileworker.svg" alt="" width={26} height={26} /><h1>FileWorker</h1></div>
-        <span className="titlebar-divider" />
+        <div className="brand" data-tauri-drag-region><img data-tauri-drag-region src="/fileworker.svg" alt="" width={26} height={26} draggable={false} /><h1 data-tauri-drag-region>FileWorker</h1></div>
+        <span className="titlebar-divider" data-tauri-drag-region />
         <span className="workspace-title" data-tauri-drag-region>文件工作区</span>
-        <div className="titlebar-actions">
-          <span className={`runtime-label ${isDesktop ? "desktop" : ""}`}><span />{isDesktop ? "本地工作区" : "浏览器预览"}</span>
+        <div className="titlebar-actions" data-tauri-drag-region>
+          <span className={`runtime-label ${isDesktop ? "desktop" : ""}`} data-tauri-drag-region><span data-tauri-drag-region />{isDesktop ? "本地工作区" : "浏览器预览"}</span>
           <ThemeMenu onError={setNotice} />
           <IconButton label="切换侧栏" onClick={() => {
             if (window.innerWidth <= 760) setMobileSidebarOpen((value) => !value);
@@ -178,9 +220,13 @@ export default function App() {
       </header>
       <div className="workspace-body">
         {mobileSidebarOpen && <button type="button" className="sidebar-scrim" aria-label="关闭侧栏" onClick={() => setMobileSidebarOpen(false)} />}
-        <Sidebar profiles={profiles} selectedId={selectedId} environment={environment} loading={profilesLoading} connectedId={remote.session?.profileId}
+        <Sidebar profiles={profiles} groups={groups} selectedId={selectedId} environment={environment} loading={profilesLoading} connectedId={remote.session?.profileId}
           localPath={listing?.path ?? ""} onNew={newProfile}
-          onSelect={(id) => { setSelectedId(id); setMobileSidebarOpen(false); setActivePane("remote"); }}
+          onNewGroup={() => setGroupEditor({ group: null })} onEditGroup={(group) => setGroupEditor({ group })}
+          onDeleteGroup={(group) => { setMutationError(""); setDeleteGroupTarget(group); }}
+          onProfileMenu={(profile, anchor, trigger) => setProfileMenu((previous) =>
+            trigger && previous?.trigger === trigger ? null : { profile, anchor, trigger })}
+          onSelect={selectProfile}
           onNavigate={(nextPath) => { setMobileSidebarOpen(false); setActivePane("local"); void navigate(nextPath); }} />
         <main className="workspace-main">
           <div className="workspace-toolbar">
@@ -190,23 +236,9 @@ export default function App() {
               <button type="button" role="tab" aria-selected={activePane === "remote"} onClick={() => setActivePane("remote")}>远程</button>
             </div>
             <div className="workspace-tools">
-              <button type="button" className="button primary compact" onClick={newProfile} disabled={profilesLoading} aria-label="添加 SFTP 连接"><Plus size={15} /><span>新建连接</span></button>
-              <div className="connection-menu-anchor" ref={menu}>
-                <IconButton label="管理当前连接" disabled={!selectedProfile || mutationBusy} aria-haspopup="menu" aria-expanded={menuOpen}
-                  onClick={() => setMenuOpen((value) => !value)}><MoreHorizontal size={18} /></IconButton>
-                {menuOpen && selectedProfile && <div className="action-menu" role="menu" aria-label="连接操作">
-                  <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setEditor({ profile: selectedProfile }); }}><Pencil size={15} />编辑连接</button>
-                  <button type="button" role="menuitem" onClick={() => { void duplicateProfile(); }}><Copy size={15} />复制连接</button>
-                  <button type="button" role="menuitem" disabled={!isDesktop} onClick={() => {
-                    setMenuOpen(false);
-                    void api.forgetCredential(selectedProfile.id)
-                      .then(() => setNotice("已移除此连接的已存凭据"))
-                      .catch((cause) => setNotice(errorMessage(cause)));
-                  }}><KeyRound size={15} />忘记已存凭据</button>
-                  <div className="menu-divider" />
-                  <button type="button" role="menuitem" className="danger-text" onClick={() => { setMenuOpen(false); setDeleteTarget(selectedProfile); }}><Trash2 size={15} />删除连接</button>
-                </div>}
-              </div>
+              <button type="button" className="button primary compact" onClick={() => newProfile()} disabled={profilesLoading} aria-label="添加 SFTP 连接"><Plus size={15} /><span>新建连接</span></button>
+              <IconButton label="管理当前连接" ref={menuTrigger} disabled={!selectedProfile || mutationBusy} aria-haspopup="menu" aria-expanded={Boolean(profileMenu)}
+                onClick={openCurrentMenu}><MoreHorizontal size={18} /></IconButton>
             </div>
           </div>
           {notice && <div className="notice" role="alert"><span>{notice}</span><IconButton label="关闭提示" onClick={() => setNotice("")}><X size={15} /></IconButton></div>}
@@ -237,10 +269,10 @@ export default function App() {
               }}
               drag={drag.pane("remote")}
               externalDropTarget={finderDrop.target} dropRef={finderDrop.dropRef}
-              onMenu={() => setMenuOpen((value) => !value)} />
+              onMenu={openCurrentMenu} />
           </div>
           <TransferQueue snapshot={transfers.snapshot} sessionId={remote.session?.sessionId ?? null}
-            dialogBlocked={Boolean(editor || deleteTarget || remote.attempt)}
+            dialogBlocked={Boolean(editor || groupEditor || deleteTarget || deleteGroupTarget || remote.attempt)}
             onCancel={(id) => { void transfers.cancel(id); }} onRetry={(id) => { void transfers.retry(id); }}
             onResolve={transfers.resolve}
             onConcurrency={(value) => { void transfers.concurrency(value); }} onClear={() => { void transfers.clear(); }} />
@@ -251,14 +283,30 @@ export default function App() {
         <span className="status-connection">{remote.session ? <PlugZap size={12} /> : <Unplug size={12} />}{selectedProfile ? `${selectedProfile.host} · ${remote.session ? "已连接" : remote.attempt ? "连接中" : "未连接"}` : "未连接服务器"}</span>
         <div className="status-rates"><span><ArrowUpFromLine size={11} />{formatBytes(rates.upload)}/s</span><span><ArrowDownToLine size={11} />{formatBytes(rates.download)}/s</span></div>
       </footer>
-      {editor && <ProfileDialog profile={editor.profile} onSave={saveProfile} onClose={() => setEditor(null)} />}
+      {profileMenu && <ProfileMenu profile={profileMenu.profile} anchor={profileMenu.anchor} trigger={profileMenu.trigger} busy={mutationBusy} desktop={isDesktop}
+        onClose={closeProfileMenu} onConnect={() => requestConnect(profileMenu.profile.id)}
+        onEdit={() => setEditor({ profile: profileMenu.profile })}
+        onDuplicate={() => { void duplicateProfile(profileMenu.profile); }}
+        onForget={() => { void api.forgetCredential(profileMenu.profile.id).then(() => setNotice("已移除此连接的已存凭据")).catch((cause) => setNotice(errorMessage(cause))); }}
+        onDelete={() => { setMutationError(""); setDeleteTarget(profileMenu.profile); }} />}
+      {editor && <ProfileDialog profile={editor.profile} groups={groups} initialGroupId={editor.groupId} credentialStorage={environment?.credentialStorage}
+        onSave={saveProfile} onClose={() => setEditor(null)} />}
+      {groupEditor && <GroupDialog group={groupEditor.group} onSave={saveGroup} onClose={() => setGroupEditor(null)} />}
       {remote.attempt && <ConnectionDialog key={remote.attempt.id} attempt={remote.attempt} working={remote.working}
-        error={remote.dialogError} onCancel={remote.cancel} onTrust={remote.trust} onAuthenticate={remote.authenticate} />}
+        error={remote.dialogError} initialInput={remote.initialInput} onCancel={remote.cancel} onTrust={remote.trust} onAuthenticate={remote.authenticate} />}
       {deleteTarget && <Dialog title="删除连接" onClose={() => setDeleteTarget(null)} busy={mutationBusy} className="confirm-dialog">
-        <div className="dialog-body"><p className="confirm-message">删除「{deleteTarget.name}」？</p><p className="muted">服务器上的文件不会受到影响。</p></div>
+        <div className="dialog-body"><p className="confirm-message">删除「{deleteTarget.name}」？</p><p className="muted">同时移除此连接的已存凭据，服务器上的文件不会受到影响。</p>
+          {mutationError && <p className="form-error" role="alert">{mutationError}</p>}</div>
         <footer className="dialog-footer"><button type="button" className="button secondary" disabled={mutationBusy} onClick={() => setDeleteTarget(null)}>取消</button>
           <button type="button" className="button danger" disabled={mutationBusy} onClick={() => { void deleteProfile(); }}><Trash2 size={15} />{mutationBusy ? "正在删除" : "删除连接"}</button>
         </footer>
+      </Dialog>}
+      {deleteGroupTarget && <Dialog title="删除分组" onClose={() => setDeleteGroupTarget(null)} busy={mutationBusy} className="confirm-dialog">
+        <div className="dialog-body"><p className="confirm-message">删除「{deleteGroupTarget.name}」？</p>
+          <p className="muted">组内连接会移到未分组，不会删除连接、已存凭据或服务器文件。</p>
+          {mutationError && <p className="form-error" role="alert">{mutationError}</p>}</div>
+        <footer className="dialog-footer"><button type="button" className="button secondary" disabled={mutationBusy} onClick={() => setDeleteGroupTarget(null)}>取消</button>
+          <button type="button" className="button danger" disabled={mutationBusy} onClick={() => { void deleteGroup(); }}><Trash2 size={15} />删除分组</button></footer>
       </Dialog>}
     </div>
   );

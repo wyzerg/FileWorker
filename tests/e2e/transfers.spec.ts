@@ -26,6 +26,8 @@ async function installTransferFixture(page: Page, conflictCount = 1) {
           switch (command) {
             case "get_environment": return { homePath: "/local", runtime: "desktop", shortcuts: [] };
             case "list_profiles": return [profile];
+            case "list_groups": return [];
+            case "credential_status": return { available: false, supported: true };
             case "list_local_directory": return { path: "/local", parentPath: "/", entries: local, warnings: [] };
             case "probe_connection": return { attemptId: args.attemptId, host: profile.host, port: 22, trusted: true, identity: { algorithm: "ssh-ed25519", fingerprint: "SHA256:test" } };
             case "authenticate_connection": return { sessionId: "session", profileId: profile.id, initialPath: "/", warning: null };

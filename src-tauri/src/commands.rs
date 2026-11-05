@@ -1,19 +1,18 @@
 use fileworker_core::{
     error::CoreError,
     local::{DirectoryListing, list_directory},
-    profiles::{ConnectionProfile, ProfileStore},
+    profile_service::ProfileService,
+    profiles::{ConnectionGroup, ConnectionProfile, ProfileStore},
 };
 use serde::Serialize;
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 use tauri::State;
 
 pub struct AppState {
     pub home: PathBuf,
-    pub profiles: Arc<Mutex<ProfileStore>>,
+    pub profiles: Arc<ProfileService>,
     pub remote: Arc<fileworker_core::connections::ConnectionManager>,
+    pub connection_tests: Arc<fileworker_core::connections::ConnectionManager>,
     pub transfers: Arc<fileworker_core::transfers::TransferManager>,
 }
 
@@ -31,6 +30,7 @@ pub struct Environment {
     shortcuts: Vec<Shortcut>,
     runtime: &'static str,
     finder_drop: bool,
+    credential_storage: bool,
 }
 
 #[tauri::command]
@@ -63,6 +63,7 @@ pub fn get_environment(state: State<'_, AppState>) -> Result<Environment, CoreEr
             .collect(),
         runtime: "desktop",
         finder_drop: cfg!(target_os = "macos"),
+        credential_storage: cfg!(target_os = "macos"),
     })
 }
 
@@ -99,12 +100,30 @@ pub async fn save_profile(
     state: State<'_, AppState>,
     profile: ConnectionProfile,
 ) -> Result<ConnectionProfile, CoreError> {
-    with_store(&state, move |store| store.save(profile)).await
+    with_profiles(&state, move |service| service.save(profile)).await
 }
 
 #[tauri::command]
 pub async fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), CoreError> {
-    with_store(&state, move |store| store.delete(&id)).await
+    with_profiles(&state, move |service| service.delete(&id)).await
+}
+
+#[tauri::command]
+pub async fn list_groups(state: State<'_, AppState>) -> Result<Vec<ConnectionGroup>, CoreError> {
+    with_store(&state, |store| store.list_groups()).await
+}
+
+#[tauri::command]
+pub async fn save_group(
+    state: State<'_, AppState>,
+    group: ConnectionGroup,
+) -> Result<ConnectionGroup, CoreError> {
+    with_store(&state, move |store| store.save_group(group)).await
+}
+
+#[tauri::command]
+pub async fn delete_group(state: State<'_, AppState>, id: String) -> Result<(), CoreError> {
+    with_store(&state, move |store| store.delete_group(&id)).await
 }
 
 pub(crate) async fn with_store<T, F>(state: &AppState, operation: F) -> Result<T, CoreError>
@@ -112,13 +131,16 @@ where
     T: Send + 'static,
     F: FnOnce(&ProfileStore) -> Result<T, CoreError> + Send + 'static,
 {
+    with_profiles(state, move |service| operation(service.store())).await
+}
+
+pub(crate) async fn with_profiles<T, F>(state: &AppState, operation: F) -> Result<T, CoreError>
+where
+    T: Send + 'static,
+    F: FnOnce(&ProfileService) -> Result<T, CoreError> + Send + 'static,
+{
     let profiles = Arc::clone(&state.profiles);
-    tauri::async_runtime::spawn_blocking(move || {
-        let guard = profiles.lock().map_err(|_| {
-            CoreError::new("storage_unavailable", "配置存储暂时不可用，请重新启动应用")
-        })?;
-        operation(&guard)
-    })
-    .await
-    .map_err(|_| CoreError::new("worker_failed", "配置操作意外结束"))?
+    tauri::async_runtime::spawn_blocking(move || operation(&profiles))
+        .await
+        .map_err(|_| CoreError::new("worker_failed", "配置操作意外结束"))?
 }

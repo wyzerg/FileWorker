@@ -9,6 +9,49 @@ function focusableElements(container: HTMLElement | null): HTMLElement[] {
   ) ?? []).filter((element) => !element.matches(":disabled") && element.tabIndex >= 0 && !element.hidden);
 }
 
+const modalStack: HTMLElement[] = [];
+let pageState: {
+  root: HTMLElement | null; inert: boolean; overflow: string; focus: HTMLElement | null;
+} | null = null;
+
+function focusPanel(panel: HTMLElement) {
+  const controls = focusableElements(panel);
+  (controls.find((element) => element.tagName === "INPUT") ?? controls[0] ?? panel).focus();
+}
+
+function registerModal(panel: HTMLElement) {
+  const previous = document.activeElement as HTMLElement | null;
+  if (!modalStack.length) {
+    const root = document.getElementById("root");
+    pageState = { root, inert: root?.inert ?? false, overflow: document.body.style.overflow, focus: previous };
+    if (root) root.inert = true;
+    document.body.style.overflow = "hidden";
+  }
+  modalStack.at(-1)?.setAttribute("inert", "");
+  modalStack.push(panel);
+  focusPanel(panel);
+  return () => {
+    const wasTop = modalStack.at(-1) === panel;
+    const index = modalStack.indexOf(panel);
+    if (index !== -1) modalStack.splice(index, 1);
+    panel.removeAttribute("inert");
+    const top = modalStack.at(-1);
+    if (top) {
+      top.removeAttribute("inert");
+      if (wasTop) {
+        if (previous?.isConnected && top.contains(previous)) previous.focus();
+        else focusPanel(top);
+      }
+    } else if (pageState) {
+      const saved = pageState;
+      pageState = null;
+      if (saved.root) saved.root.inert = saved.inert;
+      document.body.style.overflow = saved.overflow;
+      if (saved.focus?.isConnected) saved.focus.focus();
+    }
+  };
+}
+
 export function Dialog({ title, children, onClose, busy = false, className = "" }: {
   title: string; children: ReactNode; onClose: () => void; busy?: boolean; className?: string;
 }) {
@@ -17,28 +60,20 @@ export function Dialog({ title, children, onClose, busy = false, className = "" 
   const close = useRef(onClose);
   close.current = onClose;
   useLayoutEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    const overflow = document.body.style.overflow;
-    const root = document.getElementById("root");
-    const previousInert = root?.inert ?? false;
-    if (root) root.inert = true;
-    document.body.style.overflow = "hidden";
     const panel = container.current;
-    const controls = focusableElements(panel);
-    (controls.find((element) => element.tagName === "INPUT") ?? controls[0] ?? panel)?.focus();
+    if (!panel) return;
+    const unregister = registerModal(panel);
     const keepFocus = (event: FocusEvent) => {
-      if (panel && !panel.contains(event.target as Node)) panel.focus();
+      if (modalStack.at(-1) === panel && !panel.contains(event.target as Node)) panel.focus();
     };
     document.addEventListener("focusin", keepFocus);
     return () => {
       document.removeEventListener("focusin", keepFocus);
-      document.body.style.overflow = overflow;
-      if (root) root.inert = previousInert;
-      if (previous?.isConnected) previous.focus();
+      unregister();
     };
   }, []);
   useLayoutEffect(() => {
-    if (busy) container.current?.focus();
+    if (busy && modalStack.at(-1) === container.current) container.current?.focus();
   }, [busy]);
   return createPortal(
     <div className="modal-backdrop" onClick={(event) => {

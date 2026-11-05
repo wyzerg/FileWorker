@@ -36,6 +36,8 @@ async function installFixture(page: Page) {
           switch (command) {
             case "get_environment": return { homePath: "/local", runtime: "desktop", shortcuts: [], finderDrop: true };
             case "list_profiles": return [profile];
+            case "list_groups": return [];
+            case "credential_status": return { available: false, supported: true };
             case "list_local_directory": return { path: "/local", parentPath: "/", warnings: [], entries: [] };
             case "probe_connection": return {
               attemptId: args.attemptId, host: profile.host, port: 22, trusted: true,

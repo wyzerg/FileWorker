@@ -40,6 +40,13 @@ pub struct ConnectedSession {
     pub warning: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialStatus {
+    pub available: bool,
+    pub supported: bool,
+}
+
 pub struct ConnectionManager {
     inner: Arc<Mutex<Inner>>,
     expiration: Arc<Condvar>,
@@ -137,6 +144,15 @@ impl ConnectionManager {
         attempt_id: String,
         profile: ConnectionProfile,
     ) -> Result<HostProbe, CoreError> {
+        self.probe_with_registration(attempt_id, profile, || {})
+    }
+
+    pub(crate) fn probe_with_registration(
+        &self,
+        attempt_id: String,
+        profile: ConnectionProfile,
+        registered: impl FnOnce(),
+    ) -> Result<HostProbe, CoreError> {
         Uuid::parse_str(&attempt_id).map_err(|_| expired())?;
         let profile = profile.validated()?;
         let canceled = Arc::new(AtomicBool::new(false));
@@ -163,6 +179,7 @@ impl ConnectionManager {
             });
             self.expiration.notify_one();
         }
+        registered();
         let result = SftpConnection::probe(profile.clone(), self.timeout, |socket| {
             let mut inner = self.lock()?;
             let pending = valid_pending(&mut inner, &attempt_id, self.attempt_lifetime)?;
@@ -511,11 +528,62 @@ impl ConnectionManager {
         Ok(())
     }
 
+    pub fn disconnect_profile(&self, profile_id: &str) -> Result<(), CoreError> {
+        let mut inner = self.lock()?;
+        if inner
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.profile.id == profile_id)
+            && let Some(pending) = inner.pending.take()
+        {
+            close_pending(pending);
+            self.expiration.notify_one();
+        }
+        if inner
+            .active
+            .as_ref()
+            .is_some_and(|active| active.profile.id == profile_id)
+            && let Some(active) = inner.active.take()
+        {
+            active.handle.close();
+        }
+        Ok(())
+    }
+
+    pub fn credential_storage_supported(&self) -> bool {
+        self.credentials.supported()
+    }
+
     pub fn forget_credential(&self, profile: &ConnectionProfile) -> Result<(), CoreError> {
+        {
+            let mut inner = self.lock()?;
+            if inner
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.profile.id == profile.id && pending.authenticating)
+                && let Some(pending) = inner.pending.take()
+            {
+                close_pending(pending);
+                self.expiration.notify_one();
+            }
+        }
         let account = credential_account(profile);
         let operation = self.credential_operation(&account)?;
         let _operation = operation.lock().map_err(|_| unavailable())?;
         self.credentials.delete(&account)
+    }
+
+    pub fn credential_status(
+        &self,
+        profile: &ConnectionProfile,
+    ) -> Result<CredentialStatus, CoreError> {
+        let profile = profile.clone().validated()?;
+        let supported = self.credentials.supported();
+        let available = supported && self.credentials.exists(&credential_account(&profile))?;
+        Ok(CredentialStatus {
+            available,
+            supported,
+        })
     }
 
     fn credential_operation(&self, account: &str) -> Result<Arc<Mutex<()>>, CoreError> {

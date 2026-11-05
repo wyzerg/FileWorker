@@ -5,8 +5,8 @@ mod remote;
 mod transfers;
 
 use commands::AppState;
-use fileworker_core::profiles::ProfileStore;
-use std::sync::{Arc, Mutex};
+use fileworker_core::{profile_service::ProfileService, profiles::ProfileStore};
+use std::sync::Arc;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -24,10 +24,16 @@ pub fn run() {
             let transfers = Arc::new(fileworker_core::transfers::TransferManager::new(
                 remote.clone(),
             ));
+            let connection_tests = Arc::new(fileworker_core::connections::ConnectionManager::new(
+                root.clone(),
+                home.clone(),
+                Arc::new(credentials::NativeCredentialStore),
+            ));
             app.manage(AppState {
                 home,
-                profiles: Arc::new(Mutex::new(ProfileStore::new(root))),
+                profiles: Arc::new(ProfileService::new(ProfileStore::new(root), remote.clone())),
                 remote,
+                connection_tests,
                 transfers,
             });
             Ok(())
@@ -38,6 +44,14 @@ pub fn run() {
             commands::list_profiles,
             commands::save_profile,
             commands::delete_profile,
+            commands::list_groups,
+            commands::save_group,
+            commands::delete_group,
+            remote::credential_status,
+            remote::probe_draft_connection,
+            remote::trust_test_connection,
+            remote::authenticate_test_connection,
+            remote::cancel_test_connection,
             remote::probe_connection,
             remote::trust_connection,
             remote::authenticate_connection,

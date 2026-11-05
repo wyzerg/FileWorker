@@ -24,6 +24,8 @@ vi.mock("../src/lib/api", () => ({
   api: {
     getEnvironment: async () => ({ homePath: "/local", runtime: fixture.desktop ? "desktop" : "browser", shortcuts: [] }),
     listProfiles: async () => [profile],
+    listGroups: async () => [],
+    credentialStatus: async () => ({ available: false, supported: true }),
     listDirectory: (path: string | null) => fixture.local(path),
     listRemoteDirectory: (_session: string, path: string) => fixture.remote(path),
     probeConnection: async (_profile: string, attemptId: string) => ({

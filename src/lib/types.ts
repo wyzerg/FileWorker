@@ -1,4 +1,20 @@
-export type AuthMethod = "password" | "privateKey";
+export type AuthMethod = "password" | "privateKey" | "privateKeyContent";
+
+export interface ConnectionGroup {
+  id: string;
+  name: string;
+}
+
+export interface AuthenticationInput {
+  secret: string | null;
+  privateKeyContent: string | null;
+  remember: boolean;
+}
+
+export interface CredentialStatus {
+  available: boolean;
+  supported: boolean;
+}
 
 export interface ConnectionProfile {
   id: string;
@@ -9,6 +25,7 @@ export interface ConnectionProfile {
   authMethod: AuthMethod;
   privateKeyPath: string | null;
   remotePath: string;
+  groupId?: string | null;
 }
 
 export interface FileEntry {
@@ -33,6 +50,7 @@ export interface RuntimeEnvironment {
   shortcuts: { name: string; path: string }[];
   runtime: "desktop" | "browser";
   finderDrop?: boolean;
+  credentialStorage?: boolean;
 }
 
 export interface FinderDropEvent {

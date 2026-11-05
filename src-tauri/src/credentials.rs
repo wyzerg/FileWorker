@@ -5,6 +5,22 @@ pub struct NativeCredentialStore;
 
 #[cfg(target_os = "macos")]
 impl CredentialStore for NativeCredentialStore {
+    fn exists(&self, account: &str) -> Result<bool, CoreError> {
+        use security_framework::item::{ItemClass, ItemSearchOptions};
+        match ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(SERVICE)
+            .account(account)
+            .load_attributes(true)
+            .load_data(false)
+            .search()
+        {
+            Ok(items) => Ok(!items.is_empty()),
+            Err(error) if error.code() == ITEM_NOT_FOUND => Ok(false),
+            Err(_) => Err(keychain_error()),
+        }
+    }
+
     fn get(&self, account: &str) -> Result<Zeroizing<String>, CoreError> {
         let bytes = security_framework::passwords::get_generic_password(SERVICE, account).map_err(
             |error| {
@@ -51,6 +67,12 @@ fn keychain_error() -> CoreError {
 
 #[cfg(not(target_os = "macos"))]
 impl CredentialStore for NativeCredentialStore {
+    fn supported(&self) -> bool {
+        false
+    }
+    fn exists(&self, _account: &str) -> Result<bool, CoreError> {
+        Ok(false)
+    }
     fn get(&self, _account: &str) -> Result<Zeroizing<String>, CoreError> {
         Err(unsupported())
     }
@@ -93,8 +115,10 @@ mod tests {
             }
         }
         let _cleanup = Cleanup(&store, &account);
+        assert!(!store.exists(&account).unwrap());
         assert_eq!(store.get(&account).unwrap_err().code, "credential_missing");
         store.set(&account, "isolated-test-value").unwrap();
+        assert!(store.exists(&account).unwrap());
         assert_eq!(store.get(&account).unwrap().as_str(), "isolated-test-value");
         store.set(&account, "updated-isolated-value").unwrap();
         assert_eq!(
@@ -102,6 +126,7 @@ mod tests {
             "updated-isolated-value"
         );
         store.delete(&account).unwrap();
+        assert!(!store.exists(&account).unwrap());
         assert_eq!(store.get(&account).unwrap_err().code, "credential_missing");
         store.delete(&account).unwrap();
     }

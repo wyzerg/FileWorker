@@ -18,6 +18,8 @@ test("连接确认、认证和远程列表在明暗及窄视口下保持完整",
             case "transfer_snapshot": return { revision: 0, concurrency: 3, jobs: [] };
             case "get_environment": return { homePath: "/local", runtime: "desktop", shortcuts: [] };
             case "list_profiles": return [profile];
+            case "list_groups": return [];
+            case "credential_status": return { available: false, supported: true };
             case "list_local_directory": return { path: "/local", parentPath: "/", entries: [], warnings: [] };
             case "probe_connection": return {
               attemptId: args.attemptId, host: profile.host, port: 22, trusted,

@@ -3,12 +3,27 @@ use crate::{
     profiles::{AuthMethod, ConnectionProfile},
 };
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub trait CredentialStore: Send + Sync {
     fn get(&self, account: &str) -> Result<Zeroizing<String>, CoreError>;
     fn set(&self, account: &str, secret: &str) -> Result<(), CoreError>;
     fn delete(&self, account: &str) -> Result<(), CoreError>;
+
+    fn exists(&self, account: &str) -> Result<bool, CoreError> {
+        match self.get(account) {
+            Ok(mut secret) => {
+                secret.zeroize();
+                Ok(true)
+            }
+            Err(error) if error.code == "credential_missing" => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn supported(&self) -> bool {
+        true
+    }
 }
 
 pub fn credential_account(profile: &ConnectionProfile) -> String {
@@ -20,6 +35,7 @@ pub fn credential_account(profile: &ConnectionProfile) -> String {
         match profile.auth_method {
             AuthMethod::Password => "password",
             AuthMethod::PrivateKey => "privateKey",
+            AuthMethod::PrivateKeyContent => "privateKeyContent",
         },
         profile.private_key_path.as_deref().unwrap_or(""),
     ];

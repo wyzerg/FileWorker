@@ -1,6 +1,6 @@
-use crate::commands::{AppState, with_store};
+use crate::commands::{AppState, with_profiles, with_store};
 use fileworker_core::{
-    connections::{ConnectedSession, ConnectionManager, HostProbe},
+    connections::{ConnectedSession, ConnectionManager, CredentialStatus, HostProbe},
     error::CoreError,
     local::DirectoryListing,
     profiles::ConnectionProfile,
@@ -30,14 +30,75 @@ async fn run<T: Send + 'static>(
         .map_err(|_| CoreError::new("worker_failed", "远程连接任务意外结束"))?
 }
 
+async fn run_test<T: Send + 'static>(
+    state: &AppState,
+    operation: impl FnOnce(&ConnectionManager) -> Result<T, CoreError> + Send + 'static,
+) -> Result<T, CoreError> {
+    let manager = Arc::clone(&state.connection_tests);
+    tauri::async_runtime::spawn_blocking(move || operation(&manager))
+        .await
+        .map_err(|_| CoreError::new("worker_failed", "连接测试任务意外结束"))?
+}
+
+#[tauri::command]
+pub async fn credential_status(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<CredentialStatus, CoreError> {
+    let profile = profile(&state, profile_id).await?;
+    run(&state, move |manager| manager.credential_status(&profile)).await
+}
+
+#[tauri::command]
+pub async fn probe_draft_connection(
+    state: State<'_, AppState>,
+    profile: ConnectionProfile,
+    attempt_id: String,
+) -> Result<HostProbe, CoreError> {
+    run_test(&state, move |manager| manager.probe(attempt_id, profile)).await
+}
+
+#[tauri::command]
+pub async fn trust_test_connection(
+    state: State<'_, AppState>,
+    attempt_id: String,
+) -> Result<(), CoreError> {
+    run_test(&state, move |manager| manager.trust(&attempt_id)).await
+}
+
+#[tauri::command]
+pub async fn authenticate_test_connection(
+    state: State<'_, AppState>,
+    attempt_id: String,
+    secret: Option<String>,
+) -> Result<ConnectedSession, CoreError> {
+    let secret = secret.map(Zeroizing::new);
+    run_test(&state, move |manager| {
+        let result = manager.authenticate(&attempt_id, secret, false);
+        manager.cancel(&attempt_id)?;
+        result
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_test_connection(
+    state: State<'_, AppState>,
+    attempt_id: String,
+) -> Result<(), CoreError> {
+    run_test(&state, move |manager| manager.cancel(&attempt_id)).await
+}
+
 #[tauri::command]
 pub async fn probe_connection(
     state: State<'_, AppState>,
     profile_id: String,
     attempt_id: String,
 ) -> Result<HostProbe, CoreError> {
-    let profile = profile(&state, profile_id).await?;
-    run(&state, move |manager| manager.probe(attempt_id, profile)).await
+    with_profiles(&state, move |service| {
+        service.probe(&profile_id, attempt_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -92,6 +153,8 @@ pub async fn forget_credential(
     state: State<'_, AppState>,
     profile_id: String,
 ) -> Result<(), CoreError> {
-    let profile = profile(&state, profile_id).await?;
-    run(&state, move |manager| manager.forget_credential(&profile)).await
+    with_profiles(&state, move |service| {
+        service.forget_credential(&profile_id)
+    })
+    .await
 }
