@@ -42,7 +42,8 @@
     "category": "Utility",
     "shortDescription": "双栏文件管理与 SFTP 文件传输",
     "macOS": {
-      "minimumSystemVersion": "12.0"
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": "-"
     }
   }
 }

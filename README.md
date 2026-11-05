@@ -24,6 +24,31 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 [发布计划](docs/RELEASING.md)。当前预发布仍是未使用 Developer ID 签名和公证的开发包，正式发行前还需完成
 剩余原生边界验收、签名、公证、安装升级和回退检查。
 
+## macOS 预发布安装
+
+当前推荐 `v0.1.0-preview.3` 的 macOS Apple Silicon `.app.zip`，以及同名
+`.sha256` 文件。旧 `preview.1`、`preview.2` 缺少完整应用资源签名，浏览器下载后
+可能显示“已损坏”；保留历史产物，但不再推荐安装。
+
+新包使用完整 ad-hoc 临时签名，不需要付费开发者账号；这只保证签名封装完整，
+不代表获得 Apple Developer ID 身份或完成公证，不能承诺下载后无提示直接打开。
+
+1. 从本仓库 GitHub Releases 下载 ZIP 与校验文件，在下载目录执行：
+
+   ```bash
+   shasum -a 256 -c FileWorker-v0.1.0-preview.3-macos-arm64.app.zip.sha256
+   ```
+
+2. 校验成功后解压，将新包中的 `FileWorker.app` 放到应用程序目录。
+   不要继续打开旧包解压得到的同名副本。
+3. 首次打开若因无法验证开发者或未公证而被阻止，确认来源和校验值后，
+   到「系统设置 → 隐私与安全性」查找该应用的「仍要打开」，由本人确认。
+   不需要关闭系统整体安全检查。若没有该入口或仍显示损坏，请保留提示并反馈，
+   不要对下载目录或系统批量移除隔离属性。
+
+签名校验与首次启动是分开的验收项目，实际完成范围见
+[签名修复验收记录](docs/acceptance/2026-11-05-macos-preview-signing.md)。
+
 ## 平台边界
 
 不是只能运行在 Mac，也不能把跨平台技术栈等同于当前版本已经支持所有平台：
@@ -279,6 +304,23 @@ bash scripts/run.sh tauri build --debug --bundles app
 开发版应用生成到 `target/debug/bundle/macos/FileWorker.app`。
 此版本未进行 Developer ID 签名与公证，尚不用于对外发布。
 Rust 验证与 Tauri 打包请依次执行，避免不同构建环境在共享 `target` 中干扰文档测试。
+
+macOS Apple Silicon 免费预发布构建与打包：
+
+```bash
+bash scripts/run.sh tauri build --bundles app --ci -- --locked
+bash scripts/run.sh test:preview
+bash scripts/run.sh preview:package v0.1.0-preview.3
+```
+
+`bundle.macOS.signingIdentity` 为 `"-"`，由 Tauri 对可执行文件和完整 `.app`
+执行 ad-hoc 签名。打包脚本检查签名、资源封装、应用标识、版本和 `arm64` 架构，
+验证 ZIP 完整性并解压后再次校验签名，通过后才生成 ZIP 和 SHA-256。
+输出位于 `target/previews/<标签>/`，已有目录会被拒绝，不替换旧版发布文件。
+输出路径及符号链接解析后不得位于输入应用内；最终以独占目录和不覆盖文件的方式
+提交附件，打包期间其他任务占用目标目录时拒绝提交并清理自己的临时文件。
+只允许 `vX.Y.Z-preview.N` 标签，基础版本须与应用内版本一致；签名校验通过
+不代表 Gatekeeper 信任通过，也不代表最低系统或其他平台已经实测。
 
 真实协议测试默认标为 `ignored`，需另行执行。它只启动监听 `127.0.0.1` 的临时
 AsyncSSH 服务并生成测试密钥，不开启系统 SSH 服务、不访问用户密钥：

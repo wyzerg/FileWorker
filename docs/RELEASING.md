@@ -1,7 +1,8 @@
 # FileWorker 发布计划
 
-当前状态：已提供 `v0.1.0-preview.1` macOS Apple Silicon 实验性预发布，
-本轮 `v0.1.0-preview.2` 已完成优化构建、打包及原生冒烟验收，按新标签分发。
+当前推荐 `v0.1.0-preview.3` macOS Apple Silicon 实验性预发布，
+补齐完整应用 ad-hoc 签名与打包校验。旧 `preview.1`、`preview.2` 仅有链接器签名，
+缺少完整资源封装，浏览器下载后可能显示“已损坏”；保留原标签和附件，不推荐继续安装。
 尚无正式 Release；预发布包未使用 Apple Developer ID 分发签名、未公证，不能视为稳定发行版。
 
 ## 近期顺序
@@ -15,9 +16,9 @@
    Finder 错误投放目标仍待原生验收。双栏拖拽、Finder 拖入和拖出仍分别验收，
    不将浏览器拖拽测试当作原生验收，详见 `docs/acceptance/2026-11-05-native-transfers.md`。
 3. 设计并验证暂停/恢复、续传元数据和异常退出后的恢复；在完成前仍明确标为不支持。
-4. `v0.1.0-preview.1` 已提供 macOS Apple Silicon `.app.zip` 和 SHA-256。
-   当前源码增加同名自动弹框，以 `v0.1.0-preview.2` 新标签分发，不替换旧标签或产物；
-   这些实验包仍未使用 Apple Developer ID 分发签名、未公证。
+4. `v0.1.0-preview.2` 已提供同名自动弹框。`v0.1.0-preview.3` 修正签名封装，
+   以新标签提供优化 `.app.zip` 和 SHA-256；不替换旧标签或产物。
+   免费 ad-hoc 签名不等于 Developer ID 分发签名或公证，仍可能需要单独允许打开。
 5. 建立独立于发布权限的持续集成；安装、升级、签名、公证与安全验收通过后，才确定
    首个正式版本。
 
@@ -44,6 +45,31 @@ Intel Mac 需单独构建并验收后再列为支持；Windows/Linux 不在首�
 
 ## 自动化边界
 
+免费 macOS Apple Silicon 预发布按下列顺序执行；Rust 验证和 Tauri 构建不要并行：
+
+```bash
+bash scripts/run.sh tauri build --bundles app --ci -- --locked
+bash scripts/run.sh test:preview
+bash scripts/run.sh preview:package v0.1.0-preview.3
+```
+
+Tauri 配置显式使用 `bundle.macOS.signingIdentity: "-"`，不是只依赖链接器签名。
+`scripts/package-macos-preview.mjs` 不修改输入 `.app`，检查完整资源签名、应用标识、
+基础版本和架构；压缩、校验、解压后再验证，成功后才发布本地输出目录。
+失败删除自身临时目录；已有目标目录被拒绝，避免覆盖历史附件。
+写入前解析真实路径并逐级比较目录身份，拒绝输出位于输入应用内，包括符号链接与大小写别名；
+最终独占创建目标目录，以不覆盖的硬链接提交附件，避免检查与改名之间的抢占窗口。
+若打包期间目标被其他任务占用，保留对方目录并清理自己的 staging。
+可用 `--app <FileWorker.app 路径>`、`--output <新目录>` 指定输入和输出。
+该命令不创建 Git 标签、不上传附件，也不持有发布凭据。
+
+发布前还需实际从浏览器下载并使用 Finder 解压，确认下载 ZIP 校验值一致、
+解压应用签名有效，并单独记录首次启动时的系统提示与用户授权结果。
+不能用开发机直接启动或移除隔离标记代替下载验收；不能把 `codesign --verify`
+成功说成 `spctl` 或 Gatekeeper 信任通过。没有 Developer ID 和公证时，`spctl`
+拒绝是预期边界，不能据此伪造已公证或无提示安装的结论。
+用户操作见 README；不关闭系统安全策略，不批量修改用户下载文件。
+
 持续集成先运行 Rust、真实隔离 SFTP、前端、类型、格式和 Clippy 检查；
 界面测试使用 Playwright，不能替代 macOS 原生 Finder 拖拽和安装验收。Finder
 拖入依赖 Tauri 的 `dragDropEnabled: true` 与当前 WebView 事件；Windows/Linux
@@ -54,7 +80,7 @@ Intel Mac 需单独构建并验收后再列为支持；Windows/Linux 不在首�
 正式发布前再决定 Developer ID 签名、公证和相应凭据管理方式。
 未使用 Developer ID 签名、未公证的测试包必须明确标为实验性预发布，不能宣称没有
 系统安全提示。
-当前不新增证书、密钥、账户配置或自动更新服务。
+当前只使用免费 ad-hoc 签名，不新增证书、密钥、账户配置或自动更新服务。
 
 ## 首次发布检查
 
