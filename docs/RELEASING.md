@@ -1,20 +1,21 @@
 # FileWorker 发布计划
 
-当前状态：已允许创建 `v0.1.0-preview.1` macOS Apple Silicon 实验性预发布，
-但尚无正式 Release。预发布包未使用 Apple Developer ID 分发签名、未公证，不能视为
-稳定发行版。
+当前状态：已提供 `v0.1.0-preview.1` macOS Apple Silicon 实验性预发布，
+本轮 `v0.1.0-preview.2` 已完成优化构建、打包及原生冒烟验收，按新标签分发。
+尚无正式 Release；预发布包未使用 Apple Developer ID 分发签名、未公证，不能视为稳定发行版。
 
 ## 近期顺序
 
 1. 源码、测试、锁文件、文档及 MIT 许可证已同步 GitHub，排除本机与敏感数据；
    后续修复按独立提交同步，不重写已有历史。
 2. Finder 拖入普通文件到远程栏的代码、队列复用、整批校验和浏览器边界测试已完成。
-   真实 macOS Finder 验收仍需在解锁的 Apple Silicon 环境完成；双栏拖拽、Finder
-   拖入和拖出到 Finder 仍分别验收，不将浏览器拖拽测试当作原生验收。
+   2026-11-05 在发布包上实测真实 Finder 多文件上传、同名保留两份和 SHA-256；
+   混合无效批次完整证据仍待补齐。双栏拖拽、Finder 拖入和拖出仍分别验收，
+   不将浏览器拖拽测试当作原生验收，详见 `docs/acceptance/2026-11-05-native-transfers.md`。
 3. 设计并验证暂停/恢复、续传元数据和异常退出后的恢复；在完成前仍明确标为不支持。
-4. 本轮生成并上传 `v0.1.0-preview.1` 的 macOS Apple Silicon `.app.zip` 和 SHA-256
-   校验文件；该包未使用 Apple Developer ID 分发签名、未公证，真实 Finder 验收因
-   机器锁屏仍未完成。
+4. `v0.1.0-preview.1` 已提供 macOS Apple Silicon `.app.zip` 和 SHA-256。
+   当前源码增加同名自动弹框，以 `v0.1.0-preview.2` 新标签分发，不替换旧标签或产物；
+   这些实验包仍未使用 Apple Developer ID 分发签名、未公证。
 5. 建立独立于发布权限的持续集成；安装、升级、签名、公证与安全验收通过后，才确定
    首个正式版本。
 

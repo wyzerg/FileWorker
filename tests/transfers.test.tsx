@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { FilePane } from "../src/components/FilePane";
 import { TransferQueue } from "../src/components/TransferQueue";
+import { Dialog } from "../src/components/Dialog";
 import type { DirectoryListing, TransferJob } from "../src/lib/types";
 
 const listing: DirectoryListing = {
@@ -50,7 +51,7 @@ const actions = () => ({
   onCancel: vi.fn(), onRetry: vi.fn(), onResolve: vi.fn(), onConcurrency: vi.fn(), onClear: vi.fn(),
 });
 
-it("队列使用真实字节进度，显示错误、冲突和可用操作", () => {
+it("队列使用真实字节进度，显示错误、冲突和可用操作", async () => {
   const callbacks = actions();
   const { rerender } = render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: [job] }} sessionId="session" {...callbacks} />);
   expect(screen.getByRole("progressbar", { name: "a.txt 传输进度" })).toHaveAttribute("value", "4");
@@ -61,10 +62,10 @@ it("队列使用真实字节进度，显示错误、冲突和可用操作", () =
   fireEvent.click(screen.getByRole("button", { name: "重试 a.txt" }));
   expect(callbacks.onRetry).toHaveBeenCalledWith("job-1");
   rerender(<TransferQueue snapshot={{ revision: 3, concurrency: 3, jobs: [{ ...job, state: "conflict" }] }} sessionId="session" {...callbacks} />);
-  fireEvent.click(screen.getByRole("button", { name: "处理 a.txt 的同名文件" }));
   const dialog = within(screen.getByRole("dialog", { name: "同名文件" }));
   fireEvent.click(dialog.getByRole("button", { name: "保留两份" }));
   expect(callbacks.onResolve).toHaveBeenCalledWith("job-1", "keepBoth");
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
 });
 
 it("断开后禁用旧任务重试，切换过滤和折叠不会改变任务", () => {
@@ -76,4 +77,120 @@ it("断开后禁用旧任务重试，切换过滤和折叠不会改变任务", (
   fireEvent.click(screen.getByRole("button", { name: "收起传输队列" }));
   expect(screen.getByRole("button", { name: "展开传输队列" })).toHaveAttribute("aria-expanded", "false");
   expect(callbacks.onClear).not.toHaveBeenCalled();
+});
+
+const conflicts: TransferJob[] = [
+  { ...job, state: "conflict" },
+  { ...job, id: "job-2", name: "b.txt", sourcePath: "/local/b.txt", destinationPath: "/remote/b.txt", state: "conflict" },
+];
+
+it("检测到同名后自动弹出文件名和目标路径，不默认提交任何选择", () => {
+  const callbacks = actions();
+  const { rerender } = render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: [job] }} sessionId="session" {...callbacks} />);
+  fireEvent.click(screen.getByRole("tab", { name: /已完成/ }));
+  fireEvent.click(screen.getByRole("button", { name: "收起传输队列" }));
+  rerender(<TransferQueue snapshot={{ revision: 2, concurrency: 3, jobs: conflicts }} sessionId="session" {...callbacks} />);
+  const dialog = within(screen.getByRole("dialog", { name: "同名文件" }));
+  expect(dialog.getByText(/目标已存在.*a\.txt/u)).toBeInTheDocument();
+  expect(dialog.getByText("/remote/a.txt")).toBeInTheDocument();
+  for (const name of ["跳过", "覆盖", "保留两份"]) expect(dialog.getByRole("button", { name })).toBeEnabled();
+  expect(callbacks.onResolve).not.toHaveBeenCalled();
+});
+
+it("多个同名逐个提示，等待提交结果且旧快照不会重复弹出已处理任务", async () => {
+  let finish!: () => void;
+  const callbacks = { ...actions(), onResolve: vi.fn(() => new Promise<void>((resolve) => { finish = resolve; })) };
+  const { rerender } = render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: conflicts }} sessionId="session" {...callbacks} />);
+  const dialog = screen.getByRole("dialog", { name: "同名文件" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "保留两份" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "保留两份" }));
+  expect(callbacks.onResolve).toHaveBeenCalledTimes(1);
+  expect(callbacks.onResolve).toHaveBeenCalledWith("job-1", "keepBoth");
+  for (const button of within(dialog).getAllByRole("button")) expect(button).toBeDisabled();
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(within(dialog).getByText("/remote/a.txt")).toBeInTheDocument();
+  await act(async () => { finish(); });
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(within(screen.getByRole("dialog")).getByText("/remote/b.txt")).toBeInTheDocument();
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "跳过" }));
+  expect(callbacks.onResolve).toHaveBeenLastCalledWith("job-2", "skip");
+  await act(async () => { finish(); });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  rerender(<TransferQueue snapshot={{ revision: 2, concurrency: 3, jobs: conflicts.map((item) => ({ ...item })) }} sessionId="session" {...callbacks} />);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+it.each(["关闭按钮", "Escape", "遮罩"])("%s 关闭表示稍后处理，本批不连续弹出且仍可手动打开", async (method) => {
+  const callbacks = actions();
+  const { rerender } = render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: conflicts }} sessionId="session" {...callbacks} />);
+  const dialog = screen.getByRole("dialog");
+  if (method === "关闭按钮") fireEvent.click(within(dialog).getByRole("button", { name: "关闭对话框" }));
+  else if (method === "Escape") fireEvent.keyDown(dialog, { key: "Escape" });
+  else fireEvent.click(dialog.parentElement!);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  rerender(<TransferQueue snapshot={{ revision: 2, concurrency: 3, jobs: conflicts.map((item) => ({ ...item })) }} sessionId="session" {...callbacks} />);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(callbacks.onResolve).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "处理 b.txt 的同名文件" }));
+  expect(within(screen.getByRole("dialog")).getByText("/remote/b.txt")).toBeInTheDocument();
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "覆盖" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(callbacks.onResolve).toHaveBeenCalledWith("job-2", "overwrite");
+});
+
+it("稍后处理不屏蔽后续新增冲突", () => {
+  const callbacks = actions();
+  const { rerender } = render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: [conflicts[0]] }} sessionId="session" {...callbacks} />);
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "关闭对话框" }));
+  rerender(<TransferQueue snapshot={{ revision: 2, concurrency: 3, jobs: conflicts }} sessionId="session" {...callbacks} />);
+  expect(within(screen.getByRole("dialog")).getByText("/remote/b.txt")).toBeInTheDocument();
+});
+
+it("其他弹窗打开时推迟提示，关闭后再弹出且不叠窗", () => {
+  const callbacks = actions();
+  const { rerender } = render(<>
+    <TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: conflicts }} sessionId="session" dialogBlocked {...callbacks} />
+    <Dialog title="编辑连接" onClose={vi.fn()}>连接设置</Dialog>
+  </>);
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(screen.getByRole("dialog", { name: "编辑连接" })).toBeInTheDocument();
+  rerender(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: conflicts }} sessionId="session" dialogBlocked={false} {...callbacks} />);
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(within(screen.getByRole("dialog", { name: "同名文件" })).getByText("/remote/a.txt")).toBeInTheDocument();
+});
+
+it("只提示当前会话，断开后关闭提示，重试的新尝试可以再次提示", () => {
+  const callbacks = actions();
+  const { rerender } = render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: conflicts }} sessionId="other-session" {...callbacks} />);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  rerender(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: conflicts }} sessionId="session" {...callbacks} />);
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  rerender(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: conflicts }} sessionId={null} {...callbacks} />);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  rerender(<TransferQueue snapshot={{ revision: 2, concurrency: 3, jobs: [{ ...conflicts[0], attempt: 2 }] }} sessionId="session" {...callbacks} />);
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+});
+
+it("同一次尝试离开冲突后又出现新的目标竞争时重新提示", () => {
+  const callbacks = actions();
+  const { rerender } = render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: [conflicts[0]] }} sessionId="session" {...callbacks} />);
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  rerender(<TransferQueue snapshot={{ revision: 2, concurrency: 3, jobs: [{ ...job, state: "queued" }] }} sessionId="session" {...callbacks} />);
+  rerender(<TransferQueue snapshot={{ revision: 3, concurrency: 3, jobs: [conflicts[0]] }} sessionId="session" {...callbacks} />);
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+});
+
+it("冲突处理失败时保留当前弹框和错误，可以重新提交后再处理下一个", async () => {
+  const callbacks = {
+    ...actions(),
+    onResolve: vi.fn().mockRejectedValueOnce(new Error("连接已断开，请重连后重试")).mockResolvedValue(undefined),
+  };
+  render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: conflicts }} sessionId="session" {...callbacks} />);
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "保留两份" }));
+  await waitFor(() => expect(within(screen.getByRole("dialog")).getByRole("alert")).toHaveTextContent("连接已断开"));
+  expect(within(screen.getByRole("dialog")).getByText("/remote/a.txt")).toBeInTheDocument();
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "保留两份" }));
+  await waitFor(() => expect(within(screen.getByRole("dialog")).getByText("/remote/b.txt")).toBeInTheDocument());
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });

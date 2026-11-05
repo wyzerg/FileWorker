@@ -240,8 +240,9 @@ export default function App() {
               onMenu={() => setMenuOpen((value) => !value)} />
           </div>
           <TransferQueue snapshot={transfers.snapshot} sessionId={remote.session?.sessionId ?? null}
+            dialogBlocked={Boolean(editor || deleteTarget || remote.attempt)}
             onCancel={(id) => { void transfers.cancel(id); }} onRetry={(id) => { void transfers.retry(id); }}
-            onResolve={(id, policy) => { void transfers.resolve(id, policy); }}
+            onResolve={transfers.resolve}
             onConcurrency={(value) => { void transfers.concurrency(value); }} onClear={() => { void transfers.clear(); }} />
         </main>
       </div>

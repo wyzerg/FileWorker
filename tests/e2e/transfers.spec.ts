@@ -1,7 +1,7 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
-test("文件选择、进度、冲突和重试在明暗及窄视口下可用", async ({ page }) => {
-  await page.addInitScript(() => {
+async function installTransferFixture(page: Page, conflictCount = 1) {
+  await page.addInitScript((conflictCount) => {
     const profile = {
       id: "e6814610-8703-4c50-ab27-e823c8577fc3", name: "传输验收",
       host: "test.example.invalid", port: 22, username: "tester", authMethod: "password",
@@ -15,6 +15,10 @@ test("文件选择、进度、冲突和重试在明暗及窄视口下可用", as
     }));
     Object.assign(window, {
       isTauri: true,
+      showTransferConflicts: () => {
+        for (const job of jobs) job.state = "conflict";
+        revision += 1;
+      },
       __TAURI_INTERNALS__: {
         metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
         invoke: async (command: string, args: Record<string, unknown>) => {
@@ -31,7 +35,7 @@ test("文件选择、进度、冲突和重试在明暗及窄视口下可用", as
               jobs = (args.requests as Array<Record<string, string>>).map((request, index) => ({
                 ...request, id: `job-${index}`, attempt: 1, name: request.sourcePath.split("/").pop(),
                 destinationPath: `${request.destinationDir}${request.sourcePath.split("/").pop()}`,
-                state: index === 0 ? "conflict" : "running", transferredBytes: index === 0 ? 0 : 262144,
+                state: index < conflictCount ? "conflict" : "running", transferredBytes: index < conflictCount ? 0 : 262144,
                 totalBytes: 1048576, bytesPerSecond: 131072, etaSeconds: 6, error: null, warning: null,
               }));
               revision += 1; return jobs.map((job) => job.id);
@@ -48,7 +52,11 @@ test("文件选择、进度、冲突和重试在明暗及窄视口下可用", as
         },
       },
     });
-  });
+  }, conflictCount);
+}
+
+test("文件选择、进度、冲突和重试在明暗及窄视口下可用", async ({ page }) => {
+  await installTransferFixture(page);
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   for (const theme of ["dark", "light"] as const) {
@@ -64,6 +72,13 @@ test("文件选择、进度、冲突和重试在明暗及窄视口下可用", as
       if (width < 760) await page.getByRole("tab", { name: "本地", exact: true }).click();
       await page.getByLabel("选择全部本地文件").check();
       await page.getByRole("button", { name: "上传所选文件" }).click();
+      const dialog = page.getByRole("dialog", { name: "同名文件" });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByText("/报告.csv", { exact: true })).toBeVisible();
+      await page.screenshot({ path: `test-results/${theme}-conflict-${width}.png` });
+      expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await dialog.getByRole("button", { name: "关闭对话框" }).click();
+      await expect(dialog).toBeHidden();
       await expect(page.getByText("同名待处理", { exact: true })).toBeVisible();
       const progress = page.getByRole("progressbar", { name: /很长的传输文件名称/ });
       await expect(progress).toHaveAttribute("value", "262144");
@@ -77,8 +92,8 @@ test("文件选择、进度、冲突和重试在明暗及窄视口下可用", as
       }
       await page.getByRole("button", { name: "处理 报告.csv 的同名文件" }).click();
       await expect(page.getByRole("dialog", { name: "同名文件" })).toBeVisible();
-      await page.screenshot({ path: `test-results/${theme}-conflict-${width}.png` });
       await page.getByRole("button", { name: "保留两份", exact: true }).click();
+      await expect(dialog).toBeHidden();
       await page.getByRole("button", { name: "取消 很长的传输文件名称用于验证任务队列不会溢出.bin" }).click();
       await page.getByRole("button", { name: "重试 很长的传输文件名称用于验证任务队列不会溢出.bin" }).click();
       await expect(page.getByText("磁盘空间不足，请释放空间后重试", { exact: true })).toBeVisible();
@@ -87,4 +102,52 @@ test("文件选择、进度、冲突和重试在明暗及窄视口下可用", as
     }
   }
   expect(errors).toEqual([]);
+});
+
+test("同名文件自动逐个提示，关闭后轮询不重弹且可手动处理", async ({ page }) => {
+  await installTransferFixture(page, 2);
+  await page.goto("/");
+  await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+  await page.getByLabel("密码", { exact: true }).fill("isolated-test");
+  await page.getByRole("dialog").getByRole("button", { name: "连接", exact: true }).click();
+  await expect(page.getByRole("button", { name: "断开服务器" })).toBeVisible();
+  await page.getByLabel("选择全部本地文件").check();
+  await page.getByRole("button", { name: "上传所选文件" }).click();
+  const dialog = page.getByRole("dialog", { name: "同名文件" });
+  await expect(dialog.getByText("/报告.csv", { exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await dialog.getByRole("button", { name: "保留两份" }).click();
+  await expect(dialog.getByText("/很长的传输文件名称用于验证任务队列不会溢出.bin", { exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await page.getByLabel("同时传输数量").selectOption("2");
+  await expect(page.getByLabel("同时传输数量")).toHaveValue("2");
+  await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: "处理 很长的传输文件名称用于验证任务队列不会溢出.bin 的同名文件" }).click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "跳过", exact: true }).click();
+  await expect(dialog).toBeHidden();
+});
+
+test("编辑连接期间新冲突等待现有弹窗关闭后提示", async ({ page }) => {
+  await installTransferFixture(page, 0);
+  await page.goto("/");
+  await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+  await page.getByLabel("密码", { exact: true }).fill("isolated-test");
+  await page.getByRole("dialog").getByRole("button", { name: "连接", exact: true }).click();
+  await expect(page.getByRole("button", { name: "断开服务器" })).toBeVisible();
+  await page.getByLabel("选择全部本地文件").check();
+  await page.getByRole("button", { name: "上传所选文件" }).click();
+  await expect(page.getByRole("progressbar", { name: "报告.csv 传输进度" })).toBeVisible();
+  await page.getByRole("button", { name: "添加 SFTP 连接" }).click();
+  await expect(page.getByRole("dialog", { name: "新建连接" })).toBeVisible();
+  await page.evaluate(() => (window as unknown as { showTransferConflicts: () => void }).showTransferConflicts());
+  await expect(page.locator(".transfer-row--conflict")).toHaveCount(2);
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await expect(page.getByRole("dialog", { name: "新建连接" })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "关闭对话框" }).click();
+  await expect(page.getByRole("dialog", { name: "同名文件" })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "关闭对话框" })).toBeFocused();
 });

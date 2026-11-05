@@ -66,7 +66,10 @@ export function useTransfers(onComplete: (job: TransferJob) => void, onNotice: (
       submit(() => api.enqueueFinderUpload(paths, sessionId, destinationDir)),
     cancel: (id: string) => operate(() => api.cancelTransfer(id)),
     retry: (id: string) => operate(() => api.retryTransfer(id)),
-    resolve: (id: string, policy: ConflictPolicy) => operate(() => api.resolveTransferConflict(id, policy)),
+    resolve: async (id: string, policy: ConflictPolicy) => {
+      await api.resolveTransferConflict(id, policy);
+      await refresh();
+    },
     concurrency: (value: number) => operate(() => api.setTransferConcurrency(value)),
     clear: () => operate(() => api.clearFinishedTransfers()),
   };

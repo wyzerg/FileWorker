@@ -52,8 +52,12 @@ Files: `src-tauri/src/finder_drop.rs`, `src-tauri/src/lib.rs`,
 - [x] Run the three Finder Playwright tests (`3/3`) with physical-pixel event fixtures.
 - [x] Run TypeScript, Rust workspace tests, Rust format check and Clippy.
 - [x] Build the production frontend and debug macOS `.app`.
-- [ ] Run real Finder multi-file upload, mixed invalid batch, same-name keep-both,
-  SHA-256 and temporary-file checks on an unlocked Apple Silicon desktop.
+- [x] Run real Finder multi-file upload and same-name keep-both on an unlocked
+  Apple Silicon desktop using the published `v0.1.0-preview.1` package;
+  verify source/destination SHA-256 and no temporary-file remnants.
+- [ ] Complete mixed invalid-batch native evidence with before/after queue and
+  remote-directory checks. A rejection notice was observed, but a regular source
+  had already been uploaded separately, so the full case remains unverified.
 - [ ] Verify Windows/Linux desktop build and native drag behavior before listing them
   as supported.
 
@@ -63,6 +67,11 @@ Files: `src-tauri/src/finder_drop.rs`, `src-tauri/src/lib.rs`,
   exact current feature boundary.
 - [x] Review listener lifetime, coordinate units, replay invalidation, whole-batch
   validation and the final diff.
-- [ ] Commit the feature, fast-forward `main`, push over HTTP/1.1 if needed, and
-  compare local and remote commit IDs.
+- [x] Commit the feature (`ebd6d93`), fast-forward `main`, push, and compare local
+  and remote commit IDs.
 - [x] Do not publish a GitHub Release.
+
+The no-Release constraint applied to the implementation phase. The user later
+approved the separate experimental preview release. Native observations and
+remaining verification boundaries are recorded in
+`docs/acceptance/2026-11-05-native-transfers.md`.
