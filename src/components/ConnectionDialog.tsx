@@ -21,7 +21,7 @@ export function ConnectionDialog({ attempt, working, error, initialInput, onCanc
   }, [attempt.phase, credentials.useSaved, working, credentials.checking]);
   useEffect(() => {
     if (error && credentials.useSaved) credentials.manual();
-  }, [error]);
+  }, [error, credentials.checking]);
   return (
     <Dialog title={title} onClose={onCancel} className="connection-dialog">
       <form onSubmit={(event) => {

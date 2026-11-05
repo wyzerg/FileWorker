@@ -61,6 +61,13 @@ async def main():
     denied.chmod(0)
 
     class Filesystem(asyncssh.SFTPServer):
+        async def mkdir(self, path, attrs):
+            if (root / "pause-mutation").exists():
+                (root / "mutation-entered").write_text("ready", encoding="utf-8")
+                while (root / "pause-mutation").exists():
+                    await asyncio.sleep(0.01)
+            return super().mkdir(path, attrs)
+
         async def read(self, file_obj, offset, size):
             if (root / "slow-transfers").exists():
                 await asyncio.sleep(0.04)

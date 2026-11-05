@@ -128,10 +128,8 @@ test("测试、保存并连接和已存凭据重连形成完整流程", async ({
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("button", { name: "断开服务器" }).click();
   await page.getByRole("button", { name: "连接服务器", exact: true }).click();
-  await expect(page.getByText("已保存密码", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("密码", { exact: true })).toHaveCount(0);
-  await page.getByRole("dialog").getByRole("button", { name: "连接", exact: true }).click();
   await expect(page.getByText("connected.txt", { exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   const calls = await page.evaluate(() => (window as unknown as {
     __connectionFixture: { calls: Array<{ command: string; args: Record<string, unknown> }> };
   }).__connectionFixture.calls);

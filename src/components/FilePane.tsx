@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type Ref } from "react";
-import { ArrowDown, ArrowDownToLine, ArrowUp, ArrowUpFromLine, ChevronDown, ChevronRight, Eye, EyeOff, File, FileArchive, FileCode2, FileImage, FileText, Folder, FolderOpen, HardDrive, Link2, LoaderCircle, Monitor, Pencil, PlugZap, Plus, RefreshCw, Search, Server, Unplug } from "lucide-react";
-import type { ConnectionProfile, DirectoryListing, FileEntry, SortDirection, SortKey } from "../lib/types";
+import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
+import { ArrowDown, ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUp, ArrowUpFromLine, ChevronDown, ChevronRight, Eye, EyeOff, File, FileArchive, FileCode2, FileImage, FileText, Folder, FolderOpen, HardDrive, Link2, LoaderCircle, Monitor, Pencil, PlugZap, Plus, RefreshCw, Search, Server, Unplug } from "lucide-react";
+import type { ConnectionProfile, DirectoryListing, FileAction, FileEntry, SortDirection, SortKey } from "../lib/types";
 import { formatBytes, formatDate, isOrdinaryFile, visibleEntries } from "../lib/files";
 import { IconButton } from "./IconButton";
 import type { FilePaneDrag } from "../lib/useTransferDrag";
+import { RemoteFileMenu, RemoteFileToolbar } from "./RemoteFileActions";
 
 function EntryIcon({ entry }: { entry: FileEntry }) {
   if (entry.isDir) return <Folder size={19} className="folder-icon" fill="currentColor" fillOpacity={0.13} />;
@@ -15,7 +16,7 @@ function EntryIcon({ entry }: { entry: FileEntry }) {
   return <Icon size={18} className="file-icon" />;
 }
 
-export function FilePane({ side, listing, path, parentPath, onPathChange, onNavigate, loading, error, onChooseDirectory, profile, onNewProfile, onEditProfile, onMenu, preview = false, connected = false, connecting = false, onConnect, onDisconnect, transferEnabled = false, onTransfer, drag, externalDropTarget = false, dropRef }: {
+export function FilePane({ side, listing, path, parentPath, onPathChange, onNavigate, loading, error, onChooseDirectory, profile, onNewProfile, onEditProfile, onMenu, preview = false, connected = false, connecting = false, onConnect, onDisconnect, transferEnabled = false, onTransfer, drag, externalDropTarget = false, dropRef, onFileAction, mutationsBlocked = false, canGoBack = false, canGoForward = false, onBack, onForward }: {
   side: "local" | "remote";
   listing?: DirectoryListing | null;
   path: string;
@@ -39,6 +40,12 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
   drag?: FilePaneDrag;
   externalDropTarget?: boolean;
   dropRef?: Ref<HTMLDivElement>;
+  onFileAction?: (action: FileAction, entries: FileEntry[]) => void;
+  mutationsBlocked?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  onBack?: () => void;
+  onForward?: () => void;
 }) {
   const local = side === "local";
   const navigable = (local || connected) && !preview;
@@ -49,6 +56,9 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
   const [direction, setDirection] = useState<SortDirection>("asc");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const anchor = useRef<string | null>(null);
+  const [menu, setMenu] = useState<{ anchor: { x: number; y: number }; entries: FileEntry[]; trigger: HTMLElement | null } | null>(null);
+  const closeMenu = useCallback(() => setMenu(null), []);
+  useEffect(closeMenu, [listing, loading, closeMenu]);
   useEffect(() => { setSelected(new Set()); setQuery(""); anchor.current = null; }, [listing?.path]);
   const entries = useMemo(() => visibleEntries(listing?.entries ?? [], query, showHidden, sortKey, direction),
     [listing, query, showHidden, sortKey, direction]);
@@ -92,6 +102,22 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
     setSortKey(key);
   };
   const label = local ? "本地" : "远程";
+  const actionOptions = {
+    ready: navigable && Boolean(listing) && !loading, entries: selectedEntries, mutationsBlocked,
+    downloadEnabled: transferEnabled,
+    onAction: (action: FileAction, targets: FileEntry[]) => {
+      if (onFileAction) onFileAction(action, targets);
+      else if (action === "download") onTransfer?.(targets);
+    },
+  };
+  function openMenu(x: number, y: number, entry?: FileEntry, trigger: HTMLElement | null = null) {
+    if (local) return;
+    const targets = entry ? selected.has(entry.path) ? selectedEntries : [entry] : [];
+    if (!entry || !selected.has(entry.path)) {
+      setSelected(new Set(targets.map((item) => item.path))); anchor.current = entry?.path ?? null;
+    }
+    setMenu({ anchor: { x, y }, entries: targets, trigger });
+  }
   return (
     <section className={`file-pane file-pane--${side} ${drag?.target || externalDropTarget ? "file-pane--drop-target" : ""}`} aria-label={`${label}文件`}>
       <header className="pane-heading">
@@ -102,6 +128,10 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
         {!local && profile && <IconButton label="连接操作" onClick={onMenu}><ChevronDown size={16} /></IconButton>}
       </header>
       <div className="pane-toolbar">
+        {!local && <>
+          <IconButton label="远程后退" disabled={!navigable || !canGoBack || loading} onClick={onBack}><ArrowLeft size={16} /></IconButton>
+          <IconButton label="远程前进" disabled={!navigable || !canGoForward || loading} onClick={onForward}><ArrowRight size={16} /></IconButton>
+        </>}
         <IconButton label={`${label}返回上级`} disabled={!navigable || !parent || loading}
           onClick={() => onNavigate?.(parent ?? null)}><ArrowUp size={17} /></IconButton>
         <form className="path-form" onSubmit={(event) => { event.preventDefault(); if (navigable) onNavigate?.(path); }}>
@@ -121,13 +151,18 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
           onChange={(event) => setQuery(event.target.value)} placeholder="筛选文件" disabled={!listing} /></label>
         <IconButton label={showHidden ? "隐藏点文件" : "显示隐藏文件"} aria-pressed={showHidden} disabled={!listing}
           onClick={() => setShowHidden((value) => !value)}>{showHidden ? <Eye size={16} /> : <EyeOff size={16} />}</IconButton>
-        <IconButton label={local ? "上传所选文件" : "下载所选文件"}
+        {local && <IconButton label="上传所选文件"
           disabled={!transferEnabled || preview || loading || !selectedEntries.length || selectedEntries.some((entry) => entry.isDir || entry.isSymlink)}
           onClick={() => onTransfer?.(selectedEntries)}>
           {local ? <ArrowUpFromLine size={16} /> : <ArrowDownToLine size={16} />}
-        </IconButton>
+        </IconButton>}
       </div>
+      {!local && <RemoteFileToolbar {...actionOptions} />}
       <div className="file-list-container" ref={dropRef} aria-busy={loading || undefined}
+        onContextMenu={(event) => {
+          event.preventDefault(); event.stopPropagation();
+          openMenu(event.clientX, event.clientY, undefined, event.currentTarget);
+        }}
         onDragEnter={(event) => { event.preventDefault(); }}
         onDragOver={(event) => {
           event.preventDefault();
@@ -170,10 +205,23 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
               }}
               onDragEnd={drag?.end}
               tabIndex={selected.has(entry.path) || (!selectedEntries.length && index === 0) ? 0 : -1}
-              onClick={(event) => select(entry, event)} onDoubleClick={() => { if (entry.isDir) onNavigate?.(entry.path); }}
+              onClick={(event) => select(entry, event)} onDoubleClick={() => {
+                if (entry.isDir) onNavigate?.(entry.path);
+                else if (!local && !entry.isSymlink) onFileAction?.("preview", [entry]);
+              }}
+              onContextMenu={(event) => {
+                event.preventDefault(); event.stopPropagation();
+                openMenu(event.clientX, event.clientY, entry, event.currentTarget);
+              }}
               onKeyDown={(event) => {
                 if (event.target instanceof HTMLInputElement) return;
+                if (!local && (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey))) {
+                  event.preventDefault(); event.stopPropagation();
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  openMenu(bounds.left + 20, bounds.bottom, entry, event.currentTarget); return;
+                }
                 if (event.key === "Enter" && entry.isDir) onNavigate?.(entry.path);
+                else if (event.key === "Enter" && !local && !entry.isSymlink) onFileAction?.("preview", [entry]);
                 if (event.key === " " && !entry.isDir && !entry.isSymlink) { event.preventDefault(); toggleFile(entry); }
                 if (event.key === "a" && (event.metaKey || event.ctrlKey)) {
                   event.preventDefault(); setSelected(new Set(selectable.map((item) => item.path)));
@@ -221,6 +269,8 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
         {listing?.warnings.length ? <span className="warning-count" title={listing.warnings.join("\n")}>{listing.warnings.length} 项读取警告</span>
           : <span>{local ? <><HardDrive size={12} />{preview ? "未接入" : "本地磁盘"}</> : <><Unplug size={12} />SFTP</>}</span>}
       </footer>
+      {!local && menu && <RemoteFileMenu {...actionOptions} entries={menu.entries} anchor={menu.anchor} trigger={menu.trigger}
+        onClose={closeMenu} onRefresh={() => onNavigate?.(listing?.path ?? path)} />}
     </section>
   );
 }

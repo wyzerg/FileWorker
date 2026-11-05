@@ -4,6 +4,7 @@ use fileworker_core::{
     error::CoreError,
     local::DirectoryListing,
     profiles::ConnectionProfile,
+    remote_files::{RemoteFileAction, RemoteFileProperties, RemotePreview},
 };
 use std::sync::Arc;
 use tauri::State;
@@ -146,6 +147,45 @@ pub async fn disconnect_session(
     session_id: String,
 ) -> Result<(), CoreError> {
     run(&state, move |manager| manager.disconnect(&session_id)).await
+}
+
+#[tauri::command]
+pub async fn remote_file_properties(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<RemoteFileProperties, CoreError> {
+    run(&state, move |manager| {
+        manager.file_properties(&session_id, &path)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn preview_remote_file(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+) -> Result<RemotePreview, CoreError> {
+    run(&state, move |manager| {
+        manager.preview_file(&session_id, &path)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn mutate_remote_file(
+    state: State<'_, AppState>,
+    session_id: String,
+    path: String,
+    action: RemoteFileAction,
+) -> Result<(), CoreError> {
+    let transfers = Arc::clone(&state.transfers);
+    tauri::async_runtime::spawn_blocking(move || {
+        transfers.mutate_remote_file(&session_id, &path, action)
+    })
+    .await
+    .map_err(|_| CoreError::new("worker_failed", "远程文件任务意外结束，请刷新确认"))?
 }
 
 #[tauri::command]

@@ -45,6 +45,20 @@ export interface DirectoryListing {
   warnings: string[];
 }
 
+export type FileAction = "preview" | "download" | "copyPath" | "createDirectory" | "rename" | "delete" | "properties";
+export type RemoteFileMutation = { kind: "createDirectory" | "rename"; name: string } | { kind: "delete" };
+export type RemotePreview = { kind: "text"; path: string; text: string }
+  | { kind: "image"; path: string; mime: string; data: string };
+export interface RemoteFileProperties {
+  path: string;
+  kind: "file" | "directory" | "symlink" | "special";
+  size: number | null;
+  modifiedMs: number | null;
+  permissions: string | null;
+  uid: number | null;
+  gid: number | null;
+}
+
 export interface RuntimeEnvironment {
   homePath: string | null;
   shortcuts: { name: string; path: string }[];

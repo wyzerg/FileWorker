@@ -2,7 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, TauriEvent, type Event as TauriEventPayload } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AuthenticationInput, ConnectedSession, ConflictPolicy, ConnectionGroup, ConnectionProfile, CredentialStatus, DirectoryListing, FinderDropEvent, HostProbe, RuntimeEnvironment, TransferRequest, TransferSnapshot } from "./types";
+import type { AuthenticationInput, ConnectedSession, ConflictPolicy, ConnectionGroup, ConnectionProfile, CredentialStatus, DirectoryListing, FinderDropEvent, HostProbe, RemoteFileMutation, RemoteFileProperties, RemotePreview, RuntimeEnvironment, TransferRequest, TransferSnapshot } from "./types";
 
 export const isDesktop = isTauri();
 const previewStorageKey = "fileworker.preview.profiles.v1";
@@ -152,6 +152,12 @@ export const api = {
     desktopCommand("cancel_connection", { attemptId }),
   listRemoteDirectory: (sessionId: string, path: string): Promise<DirectoryListing> =>
     desktopCommand("list_remote_directory", { sessionId, path }),
+  previewRemoteFile: (sessionId: string, path: string): Promise<RemotePreview> =>
+    desktopCommand("preview_remote_file", { sessionId, path }),
+  remoteFileProperties: (sessionId: string, path: string): Promise<RemoteFileProperties> =>
+    desktopCommand("remote_file_properties", { sessionId, path }),
+  mutateRemoteFile: (sessionId: string, path: string, action: RemoteFileMutation): Promise<void> =>
+    desktopCommand("mutate_remote_file", { sessionId, path, action }),
   disconnectSession: (sessionId: string): Promise<void> =>
     desktopCommand("disconnect_session", { sessionId }),
   forgetCredential: (profileId: string): Promise<void> =>

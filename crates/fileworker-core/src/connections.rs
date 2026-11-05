@@ -4,6 +4,7 @@ use crate::{
     known_hosts::{HostIdentity, KnownHostStore},
     local::DirectoryListing,
     profiles::ConnectionProfile,
+    remote_files::{self, RemoteFileAction, RemoteFileProperties, RemotePreview},
     sftp::SftpConnection,
 };
 use serde::Serialize;
@@ -414,6 +415,41 @@ impl ConnectionManager {
     }
 
     pub fn list(&self, session_id: &str, path: &str) -> Result<DirectoryListing, CoreError> {
+        self.with_active(session_id, |connection| connection.list_directory(path))
+    }
+
+    pub fn file_properties(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<RemoteFileProperties, CoreError> {
+        self.with_active(session_id, |connection| {
+            remote_files::properties(connection.filesystem()?, path)
+        })
+    }
+
+    pub fn preview_file(&self, session_id: &str, path: &str) -> Result<RemotePreview, CoreError> {
+        self.with_active(session_id, |connection| {
+            remote_files::preview(connection.filesystem()?, path)
+        })
+    }
+
+    pub(crate) fn mutate_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        action: RemoteFileAction,
+    ) -> Result<(), CoreError> {
+        self.with_active(session_id, |connection| {
+            remote_files::mutate(connection.filesystem()?, path, action)
+        })
+    }
+
+    fn with_active<T>(
+        &self,
+        session_id: &str,
+        operation: impl FnOnce(&SftpConnection) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
         let handle = self
             .lock()?
             .active
@@ -421,11 +457,13 @@ impl ConnectionManager {
             .filter(|active| active.id == session_id)
             .map(|active| active.handle.clone())
             .ok_or_else(closed)?;
-        let result = handle
-            .connection
-            .lock()
-            .map_err(|_| unavailable())?
-            .list_directory(path);
+        let result = {
+            let connection = handle.connection.lock().map_err(|_| unavailable())?;
+            if handle.canceled.load(Ordering::SeqCst) {
+                return Err(closed());
+            }
+            operation(&connection)
+        };
         if handle.canceled.load(Ordering::SeqCst) {
             return Err(closed());
         }

@@ -65,6 +65,7 @@ function remotePane() { return screen.getByRole("region", { name: "远程文件"
 async function connect() {
   fireEvent.click(screen.getByRole("button", { name: "连接服务器" }));
   const dialog = await screen.findByRole("dialog", { name: "服务器认证" });
+  await waitFor(() => expect(within(dialog).getByRole("button", { name: "连接" })).toBeEnabled());
   fireEvent.change(within(dialog).getByLabelText("密码"), { target: { value: "isolated" } });
   fireEvent.submit(within(dialog).getByLabelText("密码").closest("form")!);
   await screen.findByText("remote.txt");

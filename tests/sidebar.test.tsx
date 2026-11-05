@@ -137,27 +137,19 @@ describe("profile context menus", () => {
     expect(beta).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("provides a sibling overflow button that uses fresh bounds without selecting the profile", async () => {
+  it("connects the double-clicked profile and removes redundant per-profile overflow buttons", async () => {
     const user = userEvent.setup();
     const selected: string[] = [];
-    const opened: unknown[] = [];
+    const connected: string[] = [];
     render(sidebar({
       onSelect: (id) => selected.push(id),
-      onProfileMenu: (profile, anchor) => opened.push({ profile, anchor }),
+      onConnect: (id) => connected.push(id),
+      onProfileMenu: () => {},
     }));
-    const trigger = screen.getAllByRole("button", { name: "连接菜单" })[1];
-    expect(screen.getByRole("button", { name: "Betabeta.example" })).not.toContainElement(trigger);
-    expect(trigger).toHaveAccessibleDescription("Beta");
-    const bounds = vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(new DOMRect(50, 70, 20, 20));
-    await user.click(trigger);
-    bounds.mockReturnValue(new DOMRect(80, 100, 20, 20));
-    trigger.focus();
-    await user.keyboard("{Enter}");
-    expect(opened).toEqual([
-      { profile: ungrouped, anchor: { x: 50, y: 90 } },
-      { profile: ungrouped, anchor: { x: 80, y: 120 } },
-    ]);
-    expect(selected).toEqual([]);
+    await user.dblClick(screen.getByRole("button", { name: "Betabeta.example" }));
+    expect(connected).toEqual(["beta"]);
+    expect(screen.queryByRole("button", { name: "连接菜单" })).not.toBeInTheDocument();
+    expect(selected).toEqual(["beta", "beta"]);
   });
 
   it.each(["{Shift>}{F10}{/Shift}", "{ContextMenu}"])("opens the focused profile menu with %s without selecting it", async (keys) => {

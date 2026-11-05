@@ -5,6 +5,7 @@ pub mod known_hosts;
 pub mod local;
 pub mod profile_service;
 pub mod profiles;
+pub mod remote_files;
 pub mod remote_path;
 mod sftp;
 pub mod transfers;

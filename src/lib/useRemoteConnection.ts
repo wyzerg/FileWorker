@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { api, errorCode, errorMessage } from "./api";
 import type { AuthenticationInput, ConnectedSession, ConnectionAttempt, ConnectionProfile, DirectoryListing } from "./types";
 import { credentialIdentity } from "./useAuthentication";
+import { readRemoteLocation, rememberRemoteLocation } from "./remoteLocations";
 
 export function useRemoteConnection(profile: ConnectionProfile | null, onNotice: (message: string) => void) {
   const [attempt, setAttempt] = useState<ConnectionAttempt | null>(null);
@@ -14,13 +15,16 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
   const [working, setWorking] = useState(false);
   const [loading, setLoading] = useState(false);
   const [initialInput, setInitialInput] = useState<AuthenticationInput | undefined>();
+  const [history, setHistory] = useState({ paths: [] as string[], index: -1 });
+  const historyRef = useRef(history);
+  const sessionProfile = useRef<ConnectionProfile | null>(null);
   const attemptRef = useRef<ConnectionAttempt | null>(null);
   const sessionRef = useRef<ConnectedSession | null>(null);
   const request = useRef(0);
   const acceptedPath = useRef("/");
   const mounted = useRef(true);
   const operation = useRef<string | null>(null);
-  const automatic = useRef<{ attemptId: string; input: AuthenticationInput } | null>(null);
+  const automatic = useRef<{ attemptId: string; input?: AuthenticationInput } | null>(null);
   const profileKey = profile ? credentialIdentity(profile) : "";
 
   const release = useCallback(() => {
@@ -28,6 +32,8 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
     const oldAttempt = attemptRef.current; attemptRef.current = null;
     const oldSession = sessionRef.current; sessionRef.current = null;
     automatic.current = null; operation.current = null;
+    sessionProfile.current = null;
+    historyRef.current = { paths: [], index: -1 };
     if (oldAttempt) void api.cancelConnection(oldAttempt.id).catch(() => {});
     if (oldSession) void api.disconnectSession(oldSession.sessionId).catch(() => {});
   }, []);
@@ -38,6 +44,7 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
     setAttempt(null); setSession(null); setListing(null); setPath(""); setParentPath(null); setError("");
     setDialogError(""); setWorking(false); setLoading(false);
     setInitialInput(undefined);
+    setHistory(historyRef.current);
     return () => { mounted.current = false; release(); };
   }, [profileKey, release]);
 
@@ -45,9 +52,10 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
     release(); setAttempt(null); setSession(null); setListing(null); setParentPath(null);
     setLoading(false); setWorking(false); setDialogError(""); setError("");
     setInitialInput(undefined);
+    setHistory(historyRef.current);
   };
 
-  const navigate = useCallback(async (nextPath: string) => {
+  const navigate = useCallback(async (nextPath: string, historyIndex?: number, fallback?: string) => {
     const active = sessionRef.current;
     if (!active) return;
     const current = ++request.current;
@@ -58,9 +66,24 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
     setParentPath(target ? target.slice(0, target.lastIndexOf("/")) || "/" : null);
     setPath(absolutePath); setLoading(true); setError(""); setListing(null);
     try {
-      const result = await api.listRemoteDirectory(active.sessionId, absolutePath);
+      let result: DirectoryListing;
+      try {
+        result = await api.listRemoteDirectory(active.sessionId, absolutePath);
+      } catch (cause) {
+        if (!mounted.current || request.current !== current || sessionRef.current !== active) return;
+        if (!fallback || fallback === absolutePath || errorCode(cause) !== "remote_directory") throw cause;
+        onNotice("上次打开的目录不可用，已尝试返回连接的起始目录");
+        result = await api.listRemoteDirectory(active.sessionId, fallback);
+      }
       if (!mounted.current || request.current !== current || sessionRef.current !== active) return;
       acceptedPath.current = result.path;
+      if (sessionProfile.current) rememberRemoteLocation(sessionProfile.current, result.path);
+      const previous = historyRef.current;
+      const next = historyIndex !== undefined
+        ? { paths: previous.paths, index: historyIndex }
+        : previous.paths[previous.index] === result.path ? previous
+          : { paths: [...previous.paths.slice(0, previous.index + 1), result.path], index: previous.index + 1 };
+      historyRef.current = next; setHistory(next);
       setListing(result); setPath(result.path); setParentPath(result.parentPath);
     } catch (cause) {
       if (!mounted.current || request.current !== current || sessionRef.current !== active) return;
@@ -77,7 +100,7 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
   const connect = async (input?: AuthenticationInput) => {
     if (!profile || attemptRef.current || sessionRef.current) return;
     const next: ConnectionAttempt = { id: crypto.randomUUID(), profile, phase: "probing" };
-    automatic.current = input ? { attemptId: next.id, input } : null;
+    automatic.current = { attemptId: next.id, input };
     setInitialInput(input);
     attemptRef.current = next; setAttempt(next); setDialogError(""); setError(""); setListing(null);
     try {
@@ -85,15 +108,32 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
       if (!mounted.current || attemptRef.current?.id !== next.id) {
         void api.cancelConnection(next.id).catch(() => {}); return;
       }
-      const ready = { ...next, probe, phase: probe.trusted ? "auth" as const : "trust" as const };
+      const ready = { ...next, probe, phase: probe.trusted ? "probing" as const : "trust" as const };
       attemptRef.current = ready; setAttempt(ready);
-      if (probe.trusted && input) await authenticate(input.secret, input.remember, input.privateKeyContent);
+      if (probe.trusted) await authenticateAutomatic(ready);
     } catch (cause) {
       if (!mounted.current || attemptRef.current?.id !== next.id) return;
       attemptRef.current = null; setAttempt(null); setError(errorMessage(cause));
       automatic.current = null; setInitialInput(undefined);
       void api.cancelConnection(next.id).catch(() => {});
     }
+  };
+
+  const authenticateAutomatic = async (active: ConnectionAttempt) => {
+    const pending = automatic.current;
+    if (pending?.attemptId !== active.id) return;
+    let input = pending.input;
+    if (!input) {
+      try {
+        const status = await api.credentialStatus(active.profile.id);
+        if (status.available && status.supported) input = { secret: null, remember: false, privateKeyContent: null };
+      } catch { /* A failed status check leaves manual authentication available. */ }
+    }
+    if (!mounted.current || attemptRef.current?.id !== active.id) return;
+    const next = { ...active, phase: "auth" as const };
+    attemptRef.current = next;
+    if (input) await authenticate(input.secret, input.remember, input.privateKeyContent);
+    else { automatic.current = null; setAttempt(next); }
   };
 
   const handleAttemptError = (active: ConnectionAttempt, cause: unknown) => {
@@ -114,7 +154,7 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
     try {
       await api.trustConnection(active.id);
       if (!mounted.current || attemptRef.current?.id !== active.id) return;
-      const next = { ...active, phase: "auth" as const };
+      const next = { ...active, phase: "probing" as const };
       attemptRef.current = next; setAttempt(next);
     } catch (cause) {
       handleAttemptError(active, cause);
@@ -122,9 +162,8 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
       if (operation.current === active.id) operation.current = null;
       if (mounted.current && attemptRef.current?.id === active.id) setWorking(false);
     }
-    const pending = automatic.current;
-    if (pending?.attemptId === active.id && attemptRef.current?.id === active.id && attemptRef.current.phase === "auth") {
-      await authenticate(pending.input.secret, pending.input.remember, pending.input.privateKeyContent);
+    if (attemptRef.current?.id === active.id && attemptRef.current.phase === "probing") {
+      await authenticateAutomatic(attemptRef.current);
     }
   };
 
@@ -141,10 +180,13 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
       attemptRef.current = null; setAttempt(null);
       setInitialInput(undefined);
       sessionRef.current = connected; setSession(connected);
+      sessionProfile.current = active.profile;
       acceptedPath.current = connected.initialPath;
       if (connected.warning) onNotice(connected.warning);
-      void navigate(connected.initialPath);
+      const remembered = readRemoteLocation(active.profile);
+      await navigate(remembered ?? connected.initialPath, undefined, remembered ? connected.initialPath : undefined);
     } catch (cause) {
+      if (mounted.current && attemptRef.current?.id === active.id) setAttempt({ ...active, phase: "auth" });
       handleAttemptError(active, cause);
     } finally {
       if (operation.current === active.id) operation.current = null;
@@ -155,5 +197,8 @@ export function useRemoteConnection(profile: ConnectionProfile | null, onNotice:
   return {
     attempt, session, listing, path, parentPath, setPath, error, dialogError, working, loading, initialInput,
     connect, cancel, trust, authenticate, navigate,
+    canGoBack: history.index > 0, canGoForward: history.index >= 0 && history.index < history.paths.length - 1,
+    goBack: () => history.index > 0 ? navigate(history.paths[history.index - 1], history.index - 1) : Promise.resolve(),
+    goForward: () => history.index < history.paths.length - 1 ? navigate(history.paths[history.index + 1], history.index + 1) : Promise.resolve(),
   };
 }

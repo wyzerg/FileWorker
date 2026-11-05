@@ -26,3 +26,14 @@ it("连接测试使用独立后端通道，且认证不会保存密码", async (
     "authenticate_test_connection", { attemptId: "test-attempt", secret: "test-password" },
   ]);
 });
+
+it("远程文件请求带上明确的会话、路径和操作参数", async () => {
+  await api.previewRemoteFile("session", "/logs/app.log");
+  await api.remoteFileProperties("session", "/logs/app.log");
+  await api.mutateRemoteFile("session", "/logs/app.log", { kind: "rename", name: "old.log" });
+  expect(fixture.invoke.mock.calls).toEqual([
+    ["preview_remote_file", { sessionId: "session", path: "/logs/app.log" }],
+    ["remote_file_properties", { sessionId: "session", path: "/logs/app.log" }],
+    ["mutate_remote_file", { sessionId: "session", path: "/logs/app.log", action: { kind: "rename", name: "old.log" } }],
+  ]);
+});

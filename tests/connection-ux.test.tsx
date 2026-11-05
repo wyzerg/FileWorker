@@ -184,6 +184,19 @@ it("认证失败后保留本次输入，允许修改后重试", async () => {
   expect(screen.getByRole("alert")).toHaveTextContent("密码不正确");
 });
 
+it("自动认证失败后，迟到的凭据状态不能把手动输入切回已存模式", async () => {
+  let finish!: (value: unknown) => void;
+  fixture.status.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const view = render(<ConnectionDialog attempt={{ ...attempt, phase: "probing" }} working={false} error=""
+    onCancel={() => {}} onTrust={async () => {}} onAuthenticate={async () => {}} />);
+  view.rerender(<ConnectionDialog attempt={attempt} working={false} error="已存密码失效"
+    onCancel={() => {}} onTrust={async () => {}} onAuthenticate={async () => {}} />);
+  await act(async () => { finish({ available: true, supported: true }); });
+  await waitFor(() => expect(screen.getByLabelText("密码")).toBeEnabled());
+  expect(screen.queryByText("已保存密码")).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("已存密码失效");
+});
+
 it("测试草稿连接不保存配置，测试成功后回到保留输入的编辑表单", async () => {
   const user = userEvent.setup();
   const save = vi.fn();

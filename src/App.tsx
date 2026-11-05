@@ -18,6 +18,9 @@ import { useFinderDrop } from "./lib/useFinderDrop";
 import { GroupDialog } from "./components/GroupDialog";
 import { ProfileMenu } from "./components/ProfileMenu";
 import { credentialIdentity } from "./lib/useAuthentication";
+import { forgetRemoteLocation } from "./lib/remoteLocations";
+import { useRemoteFiles } from "./lib/useRemoteFiles";
+import { RemoteFileDialogs } from "./components/RemoteFileDialogs";
 
 export default function App() {
   const [environment, setEnvironment] = useState<RuntimeEnvironment | null>(null);
@@ -75,6 +78,22 @@ export default function App() {
     if (job.direction === "download") completedTargets.current.local.add(parent);
     else completedTargets.current.remote.add(JSON.stringify([job.sessionId, parent]));
   }, setNotice);
+  const hasActiveTransfers = Boolean(remote.session && transfers.snapshot.jobs.some((job) =>
+    job.sessionId === remote.session!.sessionId && ["queued", "running", "canceling", "conflict"].includes(job.state)));
+  const remoteFiles = useRemoteFiles({
+    sessionId: remote.session?.sessionId ?? null, listing: remote.listing, mutationsBlocked: hasActiveTransfers,
+    onRefresh: (directory) => { void remote.navigate(directory); }, onNotice: setNotice,
+    onSessionError: (cause) => { remote.cancel(); setNotice(errorMessage(cause)); },
+  });
+  const dialogOpen = Boolean(editor || groupEditor || deleteTarget || deleteGroupTarget || remote.attempt || remoteFiles.dialog);
+  useEffect(() => {
+    const suppressWebviewMenu = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable="true"]')) return;
+      event.preventDefault();
+    };
+    document.addEventListener("contextmenu", suppressWebviewMenu);
+    return () => document.removeEventListener("contextmenu", suppressWebviewMenu);
+  }, []);
   useEffect(() => {
     if (!loading) {
       const refresh = listing && path === listing.path && completedTargets.current.local.has(listing.path);
@@ -96,7 +115,7 @@ export default function App() {
   });
   const finderDrop = useFinderDrop({
     available: isDesktop && environment?.finderDrop === true,
-    enabled: transferReady && !editor && !groupEditor && !deleteTarget && !deleteGroupTarget && !remote.attempt,
+    enabled: transferReady && !dialogOpen,
     sessionId: remote.session?.sessionId ?? null, local: listing, remote: remote.listing,
     onUpload: (paths, sessionId, destinationDir) => { void transfers.enqueueFinder(paths, sessionId, destinationDir); },
     onInternalDragClear: drag.clear, onNotice: setNotice,
@@ -126,14 +145,13 @@ export default function App() {
   const newProfile = (groupId?: string | null) => {
     if (!profilesLoading) { setNotice(""); setProfileMenu(null); setEditor({ profile: null, groupId }); }
   };
-  const hasActiveTransfers = Boolean(remote.session && transfers.snapshot.jobs.some((job) =>
-    job.sessionId === remote.session!.sessionId && ["queued", "running", "canceling", "conflict"].includes(job.state)));
   const transferWarning = "当前连接仍有未结束的传输，请先完成或取消任务，再断开或切换连接";
   function selectProfile(id: string) {
     if (id !== selectedId && hasActiveTransfers) { setNotice(transferWarning); return; }
     setSelectedId(id); setMobileSidebarOpen(false); setActivePane("remote");
   }
   function requestConnect(id: string, input?: AuthenticationInput) {
+    if (!input && (remote.session?.profileId === id || remote.attempt?.profile.id === id)) return;
     if (hasActiveTransfers) { setNotice(transferWarning); return; }
     remote.cancel();
     pendingConnection.current = { id, input };
@@ -144,6 +162,9 @@ export default function App() {
     const changesActiveIdentity = selectedProfile?.id === profile.id && credentialIdentity(selectedProfile) !== credentialIdentity(profile);
     if (hasActiveTransfers && (connect || changesActiveIdentity)) throw new Error(transferWarning);
     const saved = await api.saveProfile(profile);
+    const previous = profiles.find((item) => item.id === saved.id);
+    if (previous && (previous.remotePath !== saved.remotePath || previous.host.toLowerCase() !== saved.host.toLowerCase()
+      || previous.port !== saved.port || previous.username !== saved.username)) forgetRemoteLocation(saved.id);
     setProfiles((previous) => {
       const index = previous.findIndex((item) => item.id === saved.id);
       return index === -1 ? [...previous, saved] : previous.map((item) => item.id === saved.id ? saved : item);
@@ -166,6 +187,7 @@ export default function App() {
     setMutationBusy(true); setMutationError("");
     try {
       await api.deleteProfile(deleteTarget.id);
+      forgetRemoteLocation(deleteTarget.id);
       const remaining = profiles.filter((profile) => profile.id !== deleteTarget.id);
       setProfiles(remaining);
       if (selectedId === deleteTarget.id) setSelectedId(remaining[0]?.id ?? null);
@@ -226,7 +248,7 @@ export default function App() {
           onDeleteGroup={(group) => { setMutationError(""); setDeleteGroupTarget(group); }}
           onProfileMenu={(profile, anchor, trigger) => setProfileMenu((previous) =>
             trigger && previous?.trigger === trigger ? null : { profile, anchor, trigger })}
-          onSelect={selectProfile}
+          onSelect={selectProfile} onConnect={(id) => { if (isDesktop) requestConnect(id); }}
           onNavigate={(nextPath) => { setMobileSidebarOpen(false); setActivePane("local"); void navigate(nextPath); }} />
         <main className="workspace-main">
           <div className="workspace-toolbar">
@@ -258,8 +280,20 @@ export default function App() {
             <FilePane side="remote" path={remote.path} parentPath={remote.parentPath} listing={remote.listing} profile={selectedProfile} onNewProfile={newProfile}
               loading={remote.loading} error={remote.error} preview={!isDesktop}
               connected={Boolean(remote.session)} connecting={Boolean(remote.attempt)}
-              onConnect={() => { void remote.connect(); }} onDisconnect={remote.cancel}
+              onConnect={() => { void remote.connect(); }} onDisconnect={() => {
+                if (hasActiveTransfers) setNotice(transferWarning); else remote.cancel();
+              }}
               onPathChange={remote.setPath} onNavigate={(nextPath) => { if (nextPath !== null) void remote.navigate(nextPath); }}
+              canGoBack={remote.canGoBack} canGoForward={remote.canGoForward}
+              onBack={() => { void remote.goBack(); }} onForward={() => { void remote.goForward(); }}
+              mutationsBlocked={hasActiveTransfers}
+              onFileAction={(action, entries) => {
+                if (action !== "download") { remoteFiles.open(action, entries); return; }
+                if (!remote.session || !listing || !transferReady) return;
+                void transfers.enqueue(entries.map((entry) => ({
+                  sessionId: remote.session!.sessionId, direction: "download", sourcePath: entry.path, destinationDir: listing.path,
+                })));
+              }}
               onEditProfile={() => { if (selectedProfile) setEditor({ profile: selectedProfile }); }}
               transferEnabled={transferReady} onTransfer={(entries) => {
                 if (!remote.session || !listing) return;
@@ -272,7 +306,7 @@ export default function App() {
               onMenu={openCurrentMenu} />
           </div>
           <TransferQueue snapshot={transfers.snapshot} sessionId={remote.session?.sessionId ?? null}
-            dialogBlocked={Boolean(editor || groupEditor || deleteTarget || deleteGroupTarget || remote.attempt)}
+            dialogBlocked={dialogOpen}
             onCancel={(id) => { void transfers.cancel(id); }} onRetry={(id) => { void transfers.retry(id); }}
             onResolve={transfers.resolve}
             onConcurrency={(value) => { void transfers.concurrency(value); }} onClear={() => { void transfers.clear(); }} />
@@ -292,6 +326,7 @@ export default function App() {
       {editor && <ProfileDialog profile={editor.profile} groups={groups} initialGroupId={editor.groupId} credentialStorage={environment?.credentialStorage}
         onSave={saveProfile} onClose={() => setEditor(null)} />}
       {groupEditor && <GroupDialog group={groupEditor.group} onSave={saveGroup} onClose={() => setGroupEditor(null)} />}
+      <RemoteFileDialogs controller={remoteFiles} />
       {remote.attempt && <ConnectionDialog key={remote.attempt.id} attempt={remote.attempt} working={remote.working}
         error={remote.dialogError} initialInput={remote.initialInput} onCancel={remote.cancel} onTrust={remote.trust} onAuthenticate={remote.authenticate} />}
       {deleteTarget && <Dialog title="删除连接" onClose={() => setDeleteTarget(null)} busy={mutationBusy} className="confirm-dialog">

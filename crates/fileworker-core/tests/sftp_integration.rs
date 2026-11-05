@@ -4,6 +4,7 @@ use fileworker_core::{
     error::CoreError,
     profile_service::ProfileService,
     profiles::{AuthMethod, ConnectionGroup, ConnectionProfile, ProfileStore},
+    remote_files::{RemoteFileAction, RemotePreview},
     transfers::{
         ConflictPolicy, TransferDirection, TransferManager, TransferRequest, TransferState,
     },
@@ -2027,4 +2028,262 @@ fn deleting_a_profile_interrupts_its_pending_handshake_and_prevents_stale_reprob
         service.probe(&profile.id, id()).unwrap_err().code,
         "profile_missing"
     );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn remote_files_preview_is_bounded_read_only_and_bound_to_the_live_session() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let files = fixture.path().join("files");
+    fs::write(files.join("app.log"), "第一行\nsecond line\tok").unwrap();
+    fs::write(files.join("binary.bin"), [0_u8, 1, 2, 255]).unwrap();
+    fs::write(files.join("large.log"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+    fs::write(files.join("oversized.bin"), vec![0_u8; 8 * 1024 * 1024 + 1]).unwrap();
+    let png = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZQAAAABJRU5ErkJggg==").unwrap();
+    fs::write(files.join("pixel.png"), &png).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("app.log", files.join("log-link")).unwrap();
+    let properties = remote.file_properties(&session, "/app.log").unwrap();
+    assert_eq!(properties.kind, "file");
+    assert_eq!(
+        properties.size,
+        Some("第一行\nsecond line\tok".len() as u64)
+    );
+    match remote.preview_file(&session, "/app.log").unwrap() {
+        RemotePreview::Text { text, .. } => assert_eq!(text, "第一行\nsecond line\tok"),
+        _ => panic!("expected text preview"),
+    }
+    match remote.preview_file(&session, "/pixel.png").unwrap() {
+        RemotePreview::Image { mime, data, .. } => {
+            assert_eq!(mime, "image/png");
+            assert_eq!(STANDARD.decode(data).unwrap(), png);
+        }
+        _ => panic!("expected raster preview"),
+    }
+    for path in [
+        "/binary.bin",
+        "/large.log",
+        "/oversized.bin",
+        "/folder",
+        "/folder-link",
+    ] {
+        assert!(remote.preview_file(&session, path).is_err(), "{path}");
+    }
+    #[cfg(unix)]
+    assert!(remote.preview_file(&session, "/log-link").is_err());
+    assert_eq!(
+        fs::read_to_string(files.join("app.log")).unwrap(),
+        "第一行\nsecond line\tok"
+    );
+    remote.disconnect(&session).unwrap();
+    assert_eq!(
+        remote
+            .file_properties(&session, "/hello.txt")
+            .unwrap_err()
+            .code,
+        "session_closed"
+    );
+    assert_eq!(
+        remote
+            .preview_file(&session, "/hello.txt")
+            .unwrap_err()
+            .code,
+        "session_closed"
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn remote_files_mutations_are_private_nonrecursive_and_never_overwrite() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let files = fixture.path().join("files");
+    let queue = TransferManager::new(remote.clone());
+    queue
+        .mutate_remote_file(
+            &session,
+            "/",
+            RemoteFileAction::CreateDirectory {
+                name: "new-folder".into(),
+            },
+        )
+        .unwrap();
+    assert!(files.join("new-folder").is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(files.join("new-folder"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+    queue
+        .mutate_remote_file(
+            &session,
+            "/hello.txt",
+            RemoteFileAction::Rename {
+                name: "renamed.txt".into(),
+            },
+        )
+        .unwrap();
+    assert!(!files.join("hello.txt").exists());
+    assert_eq!(fs::read(files.join("renamed.txt")).unwrap(), b"hello");
+    fs::write(files.join("occupied.txt"), b"keep original").unwrap();
+    assert!(
+        queue
+            .mutate_remote_file(
+                &session,
+                "/renamed.txt",
+                RemoteFileAction::Rename {
+                    name: "occupied.txt".into()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(files.join("occupied.txt")).unwrap(),
+        b"keep original"
+    );
+    assert_eq!(fs::read(files.join("renamed.txt")).unwrap(), b"hello");
+    assert!(
+        queue
+            .mutate_remote_file(&session, "/folder", RemoteFileAction::Delete {})
+            .is_err()
+    );
+    assert_eq!(fs::read(files.join("folder/child.txt")).unwrap(), b"child");
+    queue
+        .mutate_remote_file(&session, "/new-folder", RemoteFileAction::Delete {})
+        .unwrap();
+    queue
+        .mutate_remote_file(&session, "/renamed.txt", RemoteFileAction::Delete {})
+        .unwrap();
+    assert!(!files.join("new-folder").exists());
+    assert!(!files.join("renamed.txt").exists());
+    for path in [
+        "/",
+        "/folder/..",
+        "/folder-link",
+        "hello.txt",
+        "/folder//child.txt",
+    ] {
+        assert!(
+            queue
+                .mutate_remote_file(&session, path, RemoteFileAction::Delete {})
+                .is_err(),
+            "{path}"
+        );
+    }
+    for name in ["", ".", "..", "bad/name", "bad\nname"] {
+        assert!(
+            queue
+                .mutate_remote_file(
+                    &session,
+                    "/",
+                    RemoteFileAction::CreateDirectory { name: name.into() }
+                )
+                .is_err(),
+            "{name:?}"
+        );
+    }
+    remote.disconnect(&session).unwrap();
+    assert_eq!(
+        queue
+            .mutate_remote_file(&session, "/occupied.txt", RemoteFileAction::Delete {})
+            .unwrap_err()
+            .code,
+        "session_closed"
+    );
+    assert_eq!(
+        fs::read(files.join("occupied.txt")).unwrap(),
+        b"keep original"
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn remote_files_mutations_are_blocked_until_transfers_and_conflicts_finish() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote);
+    let source = local.path().join("hello.txt");
+    fs::write(&source, b"new data").unwrap();
+    let jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            source.to_str().unwrap(),
+            "/",
+            true,
+        )])
+        .unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Conflict);
+    let error = queue
+        .mutate_remote_file(&session, "/hello.txt", RemoteFileAction::Delete {})
+        .unwrap_err();
+    assert_eq!(error.code, "transfers_active");
+    assert_eq!(
+        fs::read(fixture.path().join("files/hello.txt")).unwrap(),
+        b"hello"
+    );
+    queue.cancel(&jobs[0]).unwrap();
+    queue
+        .mutate_remote_file(&session, "/hello.txt", RemoteFileAction::Delete {})
+        .unwrap();
+    assert!(!fixture.path().join("files/hello.txt").exists());
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn remote_files_mutation_reservation_blocks_concurrent_enqueue_and_releases_afterward() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = Arc::new(TransferManager::new(remote));
+    fs::write(fixture.path().join("pause-mutation"), b"enabled").unwrap();
+    let mutation = {
+        let queue = queue.clone();
+        let session = session.clone();
+        std::thread::spawn(move || {
+            queue.mutate_remote_file(
+                &session,
+                "/",
+                RemoteFileAction::CreateDirectory {
+                    name: "reserved".into(),
+                },
+            )
+        })
+    };
+    let entered = wait_until(
+        || fixture.path().join("mutation-entered").exists(),
+        Duration::from_secs(3),
+    );
+    let request = transfer_request(
+        &session,
+        "/hello.txt",
+        local.path().to_str().unwrap(),
+        false,
+    );
+    let result = queue.enqueue(vec![request.clone()]);
+    fs::remove_file(fixture.path().join("pause-mutation")).unwrap();
+    mutation.join().unwrap().unwrap();
+    assert!(entered);
+    assert_eq!(result.unwrap_err().code, "remote_file_busy");
+    assert!(queue.snapshot().unwrap().jobs.is_empty());
+    let jobs = queue.enqueue(vec![request]).unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Completed);
+    assert_eq!(fs::read(local.path().join("hello.txt")).unwrap(), b"hello");
 }

@@ -1,8 +1,9 @@
 mod file_ops;
 
-use crate::{connections::ConnectionManager, error::CoreError};
+use crate::{connections::ConnectionManager, error::CoreError, remote_files::RemoteFileAction};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
@@ -104,6 +105,20 @@ struct State {
     running: usize,
     concurrency: usize,
     stopped: bool,
+    mutating: HashSet<String>,
+}
+
+struct SessionMutation {
+    shared: Arc<Shared>,
+    session_id: String,
+}
+impl Drop for SessionMutation {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.mutating.remove(&self.session_id);
+        }
+        self.shared.changed.notify_all();
+    }
 }
 struct Record {
     job: TransferJob,
@@ -122,6 +137,7 @@ impl TransferManager {
                 running: 0,
                 concurrency: 3,
                 stopped: false,
+                mutating: HashSet::new(),
             }),
             changed: Condvar::new(),
             targets: file_ops::TargetLocks::default(),
@@ -157,6 +173,12 @@ impl TransferManager {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut state = self.lock()?;
+        if requests
+            .iter()
+            .any(|request| state.mutating.contains(&request.session_id))
+        {
+            return Err(mutating());
+        }
         if state.stopped || state.jobs.len() + requests.len() > 1000 {
             return Err(CoreError::new(
                 "queue_full",
@@ -196,6 +218,39 @@ impl TransferManager {
         Ok(ids)
     }
 
+    pub fn mutate_remote_file(
+        &self,
+        session_id: &str,
+        path: &str,
+        action: RemoteFileAction,
+    ) -> Result<(), CoreError> {
+        let guard = {
+            let mut state = self.lock()?;
+            if state.stopped || !self.remote.is_session_active(session_id) {
+                return Err(closed());
+            }
+            if state.mutating.contains(session_id) {
+                return Err(mutating());
+            }
+            if state.jobs.iter().any(|record| {
+                record.job.session_id == session_id && !record.job.state.is_finished()
+            }) {
+                return Err(CoreError::new(
+                    "transfers_active",
+                    "当前连接仍有未结束的传输，请先完成或取消任务",
+                ));
+            }
+            state.mutating.insert(session_id.into());
+            SessionMutation {
+                shared: self.shared.clone(),
+                session_id: session_id.into(),
+            }
+        };
+        let result = self.remote.mutate_file(session_id, path, action);
+        drop(guard);
+        result
+    }
+
     pub fn snapshot(&self) -> Result<TransferSnapshot, CoreError> {
         let mut state = self.lock()?;
         cancel_closed_sessions(&mut state, &self.remote);
@@ -228,6 +283,13 @@ impl TransferManager {
 
     pub fn retry(&self, id: &str) -> Result<(), CoreError> {
         let mut state = self.lock()?;
+        if state
+            .jobs
+            .iter()
+            .any(|record| record.job.id == id && state.mutating.contains(&record.job.session_id))
+        {
+            return Err(mutating());
+        }
         let record = record_mut(&mut state, id)?;
         if !matches!(
             record.job.state,
@@ -508,6 +570,12 @@ fn closed() -> CoreError {
 }
 fn unavailable() -> CoreError {
     CoreError::new("queue_unavailable", "传输队列不可用，请重新启动应用")
+}
+fn mutating() -> CoreError {
+    CoreError::new(
+        "remote_file_busy",
+        "正在修改远程文件，请等待操作结束后再传输或重试",
+    )
 }
 
 impl Drop for TransferManager {

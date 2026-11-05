@@ -25,6 +25,7 @@ vi.mock("../src/lib/api", () => ({
     getEnvironment: async () => ({ homePath: "/local", runtime: "desktop", shortcuts: [] }),
     listProfiles: async () => [profile],
     listGroups: async () => [],
+    saveProfile: async (value: ConnectionProfile) => value,
     credentialStatus: async () => ({ available: false, supported: true }),
     listDirectory: (...args: unknown[]) => fixture.listLocal(...args),
     probeConnection: (...args: unknown[]) => fixture.probe(...args),
@@ -38,6 +39,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 beforeEach(() => {
+  localStorage.clear();
   fixture.trusted = false; fixture.authenticated = false;
   fixture.snapshot.mockReset().mockResolvedValue({ revision: 0, concurrency: 3, jobs: [] });
   fixture.listLocal.mockReset().mockResolvedValue({
@@ -78,7 +80,7 @@ it("上传下载只使用另一栏已打开的目录，不使用尚未提交的�
   await screen.findByText("upload.txt");
   fireEvent.click(screen.getByLabelText("选择 upload.txt"));
   expect(screen.getByRole("button", { name: "上传所选文件" })).toBeDisabled();
-  const password = await screen.findByLabelText("密码");
+  const password = await readyPassword();
   fireEvent.change(password, { target: { value: "test-password" } });
   fireEvent.submit(password.closest("form")!);
   await screen.findByText("download.txt");
@@ -95,6 +97,35 @@ it("上传下载只使用另一栏已打开的目录，不使用尚未提交的�
   ]));
 });
 
+it("双击已连接对象不会重新探测或断开服务器", async () => {
+  fixture.trusted = true;
+  await start();
+  const password = await readyPassword();
+  fireEvent.change(password, { target: { value: "test-password" } });
+  fireEvent.submit(password.closest("form")!);
+  await screen.findByText("remote-folder");
+  fireEvent.doubleClick(screen.getByRole("navigation", { name: "已保存连接" }).querySelector("button")!);
+  expect(fixture.probe).toHaveBeenCalledTimes(1);
+  expect(fixture.disconnect).not.toHaveBeenCalled();
+});
+
+it("显式保存并连接可以更换当前活动连接的身份并使用新输入认证", async () => {
+  fixture.trusted = true;
+  const user = userEvent.setup();
+  await start();
+  await user.type(await readyPassword(), "test-password");
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "连接" }));
+  await screen.findByText("remote-folder");
+  await user.click(screen.getByRole("button", { name: "管理当前连接" }));
+  await user.click(screen.getByRole("menuitem", { name: "编辑连接" }));
+  await user.clear(screen.getByLabelText("主机地址"));
+  await user.type(screen.getByLabelText("主机地址"), "changed.example.invalid");
+  await user.type(screen.getByLabelText("密码"), "test-password");
+  await user.click(screen.getByRole("button", { name: "保存并连接" }));
+  await waitFor(() => expect(fixture.authenticate).toHaveBeenCalledTimes(2));
+  expect(await screen.findByText("remote-folder")).toBeInTheDocument();
+});
+
 it("传输完成与目标目录读取重叠时，目录读取后仍会刷新新文件", async () => {
   fixture.trusted = true;
   const entry = { name: "download.txt", path: "/download.txt", isDir: false, isSymlink: false, size: 3, modifiedMs: null, hidden: false };
@@ -102,7 +133,7 @@ it("传输完成与目标目录读取重叠时，目录读取后仍会刷新新�
   let finishEnqueue!: (value: string[]) => void;
   fixture.enqueue.mockImplementation(() => new Promise((resolve) => { finishEnqueue = resolve; }));
   await start();
-  const password = await screen.findByLabelText("密码");
+  const password = await readyPassword();
   fireEvent.change(password, { target: { value: "test-password" } });
   fireEvent.submit(password.closest("form")!);
   await screen.findByText("download.txt");
@@ -130,6 +161,12 @@ async function start() {
   render(<App />);
   await screen.findByRole("button", { name: /测试 SFTP/ });
   fireEvent.click(screen.getByRole("button", { name: "连接服务器" }));
+}
+
+async function readyPassword() {
+  const dialog = await screen.findByRole("dialog", { name: "服务器认证" });
+  await waitFor(() => expect(within(dialog).getByRole("button", { name: "连接" })).toBeEnabled());
+  return within(dialog).getByLabelText("密码");
 }
 
 function immediateConnection(initialProfile: ConnectionProfile | null) {
@@ -181,7 +218,7 @@ it("首次连接先确认指纹，确认后才输入密码，成功后可进入�
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
   expect(fixture.authenticate).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "信任并继续" }));
-  const password = await screen.findByLabelText("密码");
+  const password = await readyPassword();
   expect(password).toHaveFocus();
   await user.type(password, "test-password");
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "连接" }));
@@ -209,7 +246,7 @@ it("错误密码保持认证表单，目录错误不伪装成空目录", async (
   const user = userEvent.setup();
   fixture.trusted = true;
   await start();
-  await user.type(await screen.findByLabelText("密码"), "wrong");
+  await user.type(await readyPassword(), "wrong");
   await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "连接" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("密码不正确");
   expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -268,7 +305,7 @@ it("认证取消后晚到的成功会被断开，界面不会显示旧会话", a
   let finish!: (value: unknown) => void;
   fixture.authenticate.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
   await start();
-  const password = await screen.findByLabelText("密码");
+  const password = await readyPassword();
   fireEvent.change(password, { target: { value: "test-password" } });
   fireEvent.submit(password.closest("form")!);
   await waitFor(() => expect(fixture.authenticate).toHaveBeenCalled());
@@ -299,7 +336,7 @@ it.each(["trust", "auth"] as const)("%s 阶段过期后关闭旧表单，重新�
   if (phase === "trust") {
     fireEvent.click(await screen.findByRole("button", { name: "信任并继续" }));
   } else {
-    const password = await screen.findByLabelText("密码");
+    const password = await readyPassword();
     fireEvent.change(password, { target: { value: "test-password" } });
     fireEvent.submit(password.closest("form")!);
   }
@@ -311,7 +348,7 @@ it.each(["trust", "auth"] as const)("%s 阶段过期后关闭旧表单，重新�
   await screen.findByRole("dialog", { name: phase === "trust" ? "确认服务器指纹" : "服务器认证" });
   expect(fixture.probe.mock.calls[1][1]).not.toBe(firstAttempt);
   if (phase === "trust") fireEvent.click(screen.getByRole("button", { name: "信任并继续" }));
-  const password = await screen.findByLabelText("密码");
+  const password = await readyPassword();
   fireEvent.change(password, { target: { value: "test-password" } });
   fireEvent.submit(password.closest("form")!);
   expect(await screen.findByText("remote-folder")).toBeInTheDocument();
@@ -329,7 +366,7 @@ it.each(["/denied", "denied", "/denied/"] as const)("目录 %s 无权限后仍�
     };
   });
   await start();
-  const password = await screen.findByLabelText("密码");
+  const password = await readyPassword();
   fireEvent.change(password, { target: { value: "test-password" } });
   fireEvent.submit(password.closest("form")!);
   await screen.findByText("remote-folder");
@@ -360,7 +397,7 @@ it("清空远程路径提交时刷新最后成功打开的目录，仍可返回�
     };
   });
   await start();
-  const password = await screen.findByLabelText("密码");
+  const password = await readyPassword();
   fireEvent.change(password, { target: { value: "test-password" } });
   fireEvent.submit(password.closest("form")!);
   await screen.findByText("home-folder");
@@ -383,7 +420,7 @@ it("相对导航以最后接收的规范目录为基准，不受旧响应影响"
     return { path: path === "/new/." ? "/new" : path, parentPath: "/", entries: [], warnings: [] };
   });
   await start();
-  const password = await screen.findByLabelText("密码");
+  const password = await readyPassword();
   fireEvent.change(password, { target: { value: "test-password" } });
   fireEvent.submit(password.closest("form")!);
   const input = await screen.findByLabelText("远程路径");

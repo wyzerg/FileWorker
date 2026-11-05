@@ -9,11 +9,12 @@ const shortcutIcons = { 主目录: Home, 桌面: Monitor, 下载: Download, 文�
 const collapsedStorageKey = "fileworker.groups.collapsed.v1";
 type ProfileMenuHandler = (profile: ConnectionProfile, anchor: { x: number; y: number }, trigger?: HTMLElement) => void;
 
-function ProfileRow({ profile, selected, connected, onSelect, onProfileMenu }: {
+function ProfileRow({ profile, selected, connected, onSelect, onConnect, onProfileMenu }: {
   profile: ConnectionProfile;
   selected: boolean;
   connected: boolean;
   onSelect: (id: string) => void;
+  onConnect?: (id: string) => void;
   onProfileMenu?: ProfileMenuHandler;
 }) {
   const nameId = useId();
@@ -38,14 +39,14 @@ function ProfileRow({ profile, selected, connected, onSelect, onProfileMenu }: {
         if (button) openAtButton(button);
       }}>
       <button type="button" className={`profile-item ${selected ? "active" : ""}`}
-        aria-pressed={selected} onClick={() => onSelect(profile.id)} title={`${profile.name}\n${profile.username}@${profile.host}:${profile.port}`}>
+        aria-pressed={selected} aria-describedby={connected ? `${nameId}-status` : undefined}
+        onClick={() => onSelect(profile.id)} onDoubleClick={() => onConnect?.(profile.id)}
+        title={`${profile.name}\n${profile.username}@${profile.host}:${profile.port}`}>
         <span className="profile-icon"><Server size={17} /></span>
         <span className="profile-description"><strong id={nameId}>{profile.name}</strong><span>{profile.host}</span></span>
-        <span className={`connection-dot ${connected ? "connected" : ""}`} title={connected ? "已连接" : "未连接"} />
+        {connected ? <span id={`${nameId}-status`} className="connection-badge" aria-hidden="true"><i />已连接</span>
+          : <span className="connection-dot" title="未连接" />}
       </button>
-      <IconButton label="连接菜单" title={`${profile.name} 的连接菜单`} aria-describedby={nameId}
-        aria-haspopup="menu" className="connection-profile-menu" disabled={!onProfileMenu}
-        onClick={(event) => openAtButton(event.currentTarget)}><Ellipsis size={15} /></IconButton>
     </div>
   );
 }
@@ -155,10 +156,11 @@ function readCollapsedGroups(): string[] {
   }
 }
 
-export function Sidebar({ profiles, selectedId, onSelect, onNew, environment, localPath, onNavigate, loading, connectedId, groups = [], onNewGroup, onEditGroup, onDeleteGroup, onProfileMenu }: {
+export function Sidebar({ profiles, selectedId, onSelect, onConnect, onNew, environment, localPath, onNavigate, loading, connectedId, groups = [], onNewGroup, onEditGroup, onDeleteGroup, onProfileMenu }: {
   profiles: ConnectionProfile[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onConnect?: (id: string) => void;
   onNew: (groupId?: string | null) => void;
   environment: RuntimeEnvironment | null;
   localPath: string;
@@ -210,7 +212,7 @@ export function Sidebar({ profiles, selectedId, onSelect, onNew, environment, lo
   function renderProfile(profile: ConnectionProfile) {
     return (
       <ProfileRow key={profile.id} profile={profile} selected={selectedId === profile.id} connected={connectedId === profile.id}
-        onSelect={onSelect} onProfileMenu={onProfileMenu} />
+        onSelect={onSelect} onConnect={onConnect} onProfileMenu={onProfileMenu} />
     );
   }
 
