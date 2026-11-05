@@ -69,6 +69,20 @@
 - [x] Run frontend, whole Playwright, workspace including ignored loopback/Keychain, C ASan protocol tests, type/build/fmt/Clippy and preview packaging regressions.
 - [x] Build optimized `.app` sequentially after Rust tests; package under a new preview tag, never replace prior tags/assets.
 - [x] Verify the exact packaged app natively against an isolated generated loopback service; honestly record untested platform/download boundaries.
-- [ ] Remove only owned test credentials, processes, temporary directories and reports; verify actual user configuration is unchanged.
-- [ ] Update current documentation and append the changelog; review the final diff and verify a clean commit.
-- [ ] Commit/push, publish a new prerelease with ZIP/checksum, verify public assets and exact remote main/tag.
+- [x] Remove only owned test credentials, processes, temporary directories and reports; verify actual user configuration is unchanged.
+- [x] Update current documentation and append the changelog; review the final diff and verify a clean commit.
+- [x] Commit/push, publish a new prerelease with ZIP/checksum, verify public assets and exact remote main/tag.
+
+## Completion And Review
+
+The change was reviewed in connection/navigation, native file/queue safety, and frontend action/dialog stages.
+The smallest independently reviewable implementation stage is the native module plus active-session checks,
+queue reservation and real-protocol tests; keeping its mutation guard and tests together avoids exposing an
+unguarded write API. Frontend integration depends on those commands and was verified as a complete workflow.
+The full change is larger than the usual review-size guidance because it includes all three stages and their
+regressions; no unrelated refactors, dependencies, credential schemas or platform promises were added.
+
+Shipped code: `6e8f163ae44feebefd0aaa48480d07dfc9521e0e`.
+Published prerelease: `v0.1.0-preview.5`, GitHub release `435087805`.
+Full evidence and remaining native/download boundaries are recorded in
+`docs/acceptance/2026-11-05-remote-workspace.md`.
