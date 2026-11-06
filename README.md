@@ -19,7 +19,9 @@ macOS Apple Silicon 实验性预发布；
 `v0.1.0-preview.5` 新增连接目录记忆、已存凭据双击直连、远程工具栏与右键操作，
 支持只读文件预览和受限的远程文件修改，详见[远程工作区验收](docs/acceptance/2026-11-05-remote-workspace.md)。
 `v0.1.0-preview.6` 补齐双栏工具栏对齐与远程多选批量删除，包含确认清单、逐项结果及仅重试失败项，
-详见[本次发布说明](docs/releases/v0.1.0-preview.6.md)。
+详见[preview.6 发布说明](docs/releases/v0.1.0-preview.6.md)。
+`v0.1.0-preview.7` 已完成紧凑单行工具栏、底部通知与明暗配色的本地构建和归档校验，
+公开附件尚待上传及回读，详见[preview.7 发布说明](docs/releases/v0.1.0-preview.7.md)。
 Windows、Linux 桌面和 Intel Mac 尚未验收。
 开发版 `.app` 未进行 Developer ID 签名与公证，不应当作正式发行版分发。
 
@@ -114,8 +116,8 @@ Windows/Linux 仍需完成本地路径与远程 POSIX 路径分离、构建入�
 
 ## 双栏工作区
 
-公开的 `v0.1.0-preview.6` 已包含双栏对齐与批量删除；以下单行工具栏、扳手入口、
-底部通知与新配色属于后续源码改进，尚未替换该发布包。
+以下单行工具栏、扳手入口、底部通知与新配色已纳入 `v0.1.0-preview.7` 发布包。
+旧 `preview.6` 包含双栏对齐与批量删除，但仍使用原来的两行工具栏、上方通知和配色。
 
 本地与远程栏依次显示标题、路径、合并的筛选与操作栏、文件列表，使用一致的行高。
 筛选、隐藏文件切换和操作图标共用 `36` 像素的一行，不再分别占用两行。
@@ -427,7 +429,7 @@ macOS Apple Silicon 免费预发布构建与打包：
 ```bash
 bash scripts/run.sh tauri build --bundles app --ci -- --locked
 bash scripts/run.sh test:preview
-bash scripts/run.sh preview:package v0.1.0-preview.6
+bash scripts/run.sh preview:package v0.1.0-preview.7
 ```
 
 `bundle.macOS.signingIdentity` 为 `"-"`，由 Tauri 对可执行文件和完整 `.app`
@@ -454,11 +456,13 @@ cargo test -p fileworker-app keychain_roundtrip_and_delete_use_an_isolated_rando
 macOS，创建一个随机测试条目并在结束时清理。C AddressSanitizer 需实际对 C 依赖加
 `-fsanitize=address`，仅运行普通 Rust 测试不能替代；本轮编译与运行方式记录在第二阶段计划中。
 
-2026-11-06 当前源码的紧凑工作区与配色调整重新通过 `217` 项前端、`35` 项 Playwright、
-`11` 项打包回归、类型检查和 macOS arm64 优化 `.app` 构建；完整应用严格签名校验通过。
+2026-11-06 `v0.1.0-preview.7` 发布准备重新通过 `217` 项前端、`35` 项 Playwright、
+`68` 项默认 Rust、`11` 项打包回归、类型、格式、Clippy 和锁定依赖的
+macOS arm64 优化 `.app` 构建；ZIP、SHA-256 与解压后的严格签名校验通过。
 本轮使用隔离的浏览器 IPC 夹具，不访问用户服务器或钥匙串；没有重跑真实协议、
 原生界面、Finder 拖入、Gatekeeper 首次启动或安装升级验收。
-没有替换已安装的应用，也没有更新公开的 `preview.6` 附件。
+没有替换已安装的应用或旧版附件。`preview.7` 公开附件仍待上传和回读核验；
+产物与验证边界见[新版发布说明](docs/releases/v0.1.0-preview.7.md)。
 
 `v0.1.0-preview.6` 在 2026-11-05 重新完成的验证：
 

@@ -2,6 +2,8 @@
 
 当前推荐 `v0.1.0-preview.6` macOS Apple Silicon 实验性预发布，
 包含双栏工具栏对齐和远程多选批量删除，沿用完整应用 ad-hoc 签名与打包校验。
+`v0.1.0-preview.7` 已完成紧凑工具栏、底部通知及新配色的本地发布构建，
+公开附件尚待上传和回读核验。
 旧 `preview.1`、`preview.2` 仅有链接器签名，
 缺少完整资源封装，浏览器下载后可能显示“已损坏”；保留原标签和附件，不推荐继续安装。
 尚无正式 Release；预发布包未使用 Apple Developer ID 分发签名、未公证，不能视为稳定发行版。
@@ -54,7 +56,7 @@ Intel Mac 需单独构建并验收后再列为支持；Windows/Linux 不在首�
 ```bash
 bash scripts/run.sh tauri build --bundles app --ci -- --locked
 bash scripts/run.sh test:preview
-bash scripts/run.sh preview:package v0.1.0-preview.6
+bash scripts/run.sh preview:package v0.1.0-preview.7
 ```
 
 Tauri 配置显式使用 `bundle.macOS.signingIdentity: "-"`，不是只依赖链接器签名。
@@ -132,6 +134,23 @@ Tauri 配置显式使用 `bundle.macOS.signingIdentity: "-"`，不是只依赖�
 这些边界和回退说明必须保留在发布页，不用 `preview.5` 的历史验收替代新包验收。
 仍是免费 ad-hoc 签名、未公证的实验性预发布；不替换旧标签、附件或用户已安装的应用。
 具体产物、校验值和验证范围见 `docs/releases/v0.1.0-preview.6.md`。
+
+## preview.7 发布准备
+
+2026-11-06 重新通过 `217` 项前端、`35` 项 Playwright、`68` 项默认 Rust、
+`11` 项打包回归、类型、格式、Clippy 和锁定依赖的 macOS arm64 优化构建。
+新包包含单行筛选与操作栏、扳手连接设置、底部可展开通知及中性石墨灰/柔和浅灰主题。
+两侧工具栏保持对齐，窄窗更多操作保留多选目标；右键取消勾选后关闭旧目标菜单。
+
+本地 ZIP 完整性、SHA-256 和解压后的完整签名、标识、版本与架构已校验。
+后续以新标签上传 ZIP 和校验文件，先保留草稿，核对附件后再公开为实验性预发布，
+公开后无认证回读两项附件；不覆盖 `preview.6` 或任何旧标签和产物。
+配置 v2、凭据和目录记忆均无迁移，不自动替换已安装应用。
+
+本轮未重跑默认跳过的 `32` 项真实协议、`1` 项随机 Keychain 或 ASan，
+未进行新包原生操作、浏览器首次启动、Gatekeeper、安装升级或其他平台验收。
+程序下载和 `ditto` 解压不能代替这些原生验收；免费 ad-hoc 签名仍不等于公证。
+具体产物和边界见 `docs/releases/v0.1.0-preview.7.md`。
 
 ## 首次发布检查
 
