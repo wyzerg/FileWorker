@@ -1,7 +1,7 @@
 # FileWorker 发布计划
 
-当前推荐 `v0.1.0-preview.7` macOS Apple Silicon 实验性预发布，
-包含紧凑单行工具栏、扳手入口、底部通知与新配色，保留双栏对齐和远程多选批量删除。
+当前推荐 `v0.1.0-preview.8` macOS Apple Silicon 实验性预发布，
+包含多连接保持与后台传输，保留紧凑工具栏、底部通知、明暗主题和远程多选批量删除。
 完整应用 ad-hoc 签名、本地归档及公开附件回读校验通过。
 旧 `preview.1`、`preview.2` 仅有链接器签名，
 缺少完整资源封装，浏览器下载后可能显示“已损坏”；保留原标签和附件，不推荐继续安装。
@@ -22,7 +22,8 @@
    `v0.1.0-preview.4` 完善连接分组、认证、测试和配置迁移，
    `v0.1.0-preview.5` 完善远程目录与文件操作，
    `v0.1.0-preview.6` 补齐双栏对齐、批量删除确认与失败项重试，
-   `v0.1.0-preview.7` 提供紧凑单行工具栏、底部提示与明暗配色；
+   `v0.1.0-preview.7` 提供紧凑单行工具栏、底部提示与明暗配色，
+   `v0.1.0-preview.8` 修复切换断开并支持独立工作区和后台传输；
    均以新标签提供优化 `.app.zip` 和 SHA-256，不替换旧标签或产物。
    免费 ad-hoc 签名不等于 Developer ID 分发签名或公证，仍可能需要单独允许打开。
 5. 建立独立于发布权限的持续集成；安装、升级、签名、公证与安全验收通过后，才确定
@@ -56,7 +57,7 @@ Intel Mac 需单独构建并验收后再列为支持；Windows/Linux 不在首�
 ```bash
 bash scripts/run.sh tauri build --bundles app --ci -- --locked
 bash scripts/run.sh test:preview
-bash scripts/run.sh preview:package v0.1.0-preview.7
+bash scripts/run.sh preview:package v0.1.0-preview.8
 ```
 
 Tauri 配置显式使用 `bundle.macOS.signingIdentity: "-"`，不是只依赖链接器签名。
@@ -154,7 +155,7 @@ Tauri 配置显式使用 `bundle.macOS.signingIdentity: "-"`，不是只依赖�
 程序下载和 `ditto` 解压不能代替这些原生验收；免费 ad-hoc 签名仍不等于公证。
 具体产物和边界见 `docs/releases/v0.1.0-preview.7.md`。
 
-## preview.8 发布准备
+## preview.8 验证范围
 
 2026-11-06 多连接保持改进重新通过 `239` 项前端（默认及随机顺序 seed `72611`）、
 `36` 项 Playwright、`107` 项完整核心 Rust（含全部 `45` 项隔离真实协议）、
@@ -165,7 +166,12 @@ Tauri 配置显式使用 `bundle.macOS.signingIdentity: "-"`，不是只依赖�
 本地 `preview.8` ZIP 为 `5,389,768` 字节，SHA-256 为
 `2c2055a4bc12aa61e8053be7d3839fea350e5f8d847a8f8b2046673479eac15b`；
 ZIP 完整性、解压后完整签名、标识、基础版本和架构校验通过。
-尚未上传或公开，完成草稿上传、公开回读后再切换推荐版本，不覆盖旧附件。
+标签指向 `2a444ab`，先上传草稿并核对服务端摘要，再公开为实验性预发布。
+2026-11-06 无认证回读两项附件，与本地产物逐字节一致；公开 ZIP 的 SHA-256、
+完整性、解压后严格签名、标识、基础版本和架构再次校验通过。
+`preview.7` 附件 ID、大小和摘要不变，不覆盖旧附件。
+本轮测试虚拟环境、界面报告、公开下载及解压副本、临时发布脚本已清理，
+保留正式发布包与编译缓存，没有修改用户应用或原有预览服务。
 配置 v2、凭据、信任、目录和主题偏好格式不变，无迁移，不替换已安装应用。
 结束传输并退出后可回退 `preview.7`，但恢复单会话行为。
 本轮没有重跑真实 Keychain、ASan、原生 GUI 退出/Finder、浏览器首次启动、

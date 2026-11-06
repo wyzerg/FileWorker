@@ -84,8 +84,8 @@ a new binary is produced.
   mutation/transfer risks; resolve concrete findings with focused tests.
 - [x] Run frontend, browser, Rust, type, format, Clippy, package and optimized
   build checks. Record actual results and native/platform verification limits.
-- [ ] Clean only this task's temporary artifacts; inspect the final diff.
-- [ ] Commit and push the verified source using the user's standing request.
+- [x] Clean only this task's temporary artifacts; inspect the final diff.
+- [x] Commit and push the verified source using the user's standing request.
   Do not claim an existing published binary contains this change.
 
 ## Verification Notes
@@ -115,4 +115,15 @@ a new binary is produced.
 - Final optimized app and 11 packaging checks pass. Local preview.8 ZIP is
   5,389,768 bytes, SHA-256
   `2c2055a4bc12aa61e8053be7d3839fea350e5f8d847a8f8b2046673479eac15b`.
-  Public upload and download verification are still pending.
+  Tag preview.8 points to `2a444ab`. Source and annotated tag were pushed.
+- Release `436108688` was uploaded as a draft, checked against local size/hash
+  and published as an experimental prerelease. Unauthenticated public download
+  matched both local assets byte-for-byte, passed archive/checksum/extracted
+  signature, identifier, base version and arm64 checks. Preview.7 asset IDs,
+  sizes and hashes are unchanged.
+- Removed the task's fixture venv, browser screenshots/report, download and
+  extraction copies, and temporary release helper. Retained formal preview
+  assets and build caches; no user configuration, app, credential or preview
+  service was changed. Native GUI exit, Finder, real Keychain, ASan, first
+  launch, Gatekeeper, installation/upgrade and other platforms remain untested
+  in this round.
