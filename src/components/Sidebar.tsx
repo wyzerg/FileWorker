@@ -156,7 +156,7 @@ function readCollapsedGroups(): string[] {
   }
 }
 
-export function Sidebar({ profiles, selectedId, onSelect, onConnect, onNew, environment, localPath, onNavigate, loading, connectedId, groups = [], onNewGroup, onEditGroup, onDeleteGroup, onProfileMenu }: {
+export function Sidebar({ profiles, selectedId, onSelect, onConnect, onNew, environment, localPath, onNavigate, loading, connectedIds = [], groups = [], onNewGroup, onEditGroup, onDeleteGroup, onProfileMenu }: {
   profiles: ConnectionProfile[];
   selectedId: string | null;
   onSelect: (id: string) => void;
@@ -166,7 +166,7 @@ export function Sidebar({ profiles, selectedId, onSelect, onConnect, onNew, envi
   localPath: string;
   onNavigate: (path: string) => void;
   loading: boolean;
-  connectedId?: string;
+  connectedIds?: readonly string[];
   groups?: ConnectionGroup[];
   onNewGroup?: () => void;
   onEditGroup?: (group: ConnectionGroup) => void;
@@ -211,7 +211,7 @@ export function Sidebar({ profiles, selectedId, onSelect, onConnect, onNew, envi
 
   function renderProfile(profile: ConnectionProfile) {
     return (
-      <ProfileRow key={profile.id} profile={profile} selected={selectedId === profile.id} connected={connectedId === profile.id}
+      <ProfileRow key={profile.id} profile={profile} selected={selectedId === profile.id} connected={connectedIds.includes(profile.id)}
         onSelect={onSelect} onConnect={onConnect} onProfileMenu={onProfileMenu} />
     );
   }

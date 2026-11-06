@@ -9,7 +9,7 @@ interface NativeEvent {
   position: { x: number; y: number };
 }
 const fixture = vi.hoisted(() => ({
-  desktop: true, supported: true, occluded: false, session: 0,
+  desktop: true, supported: true, occluded: false, session: 0, profileId: "",
   listener: null as ((event: NativeEvent) => void) | null,
   subscribe: vi.fn(), unlisten: vi.fn(), upload: vi.fn(), enqueue: vi.fn(),
   local: vi.fn(), remote: vi.fn(),
@@ -19,6 +19,7 @@ const profile = {
   host: "test.example.invalid", port: 22, username: "tester", authMethod: "password",
   privateKeyPath: null, remotePath: "/remote",
 };
+const otherProfile = { ...profile, id: "e381864b-f0c3-4c9c-b67a-62702a98b187", name: "另一个 Finder 连接" };
 const local: DirectoryListing = {
   path: "/local", parentPath: "/", warnings: [],
   entries: [{ name: "local.txt", path: "/local/local.txt", isDir: false, isSymlink: false, size: 4, modifiedMs: null, hidden: false }],
@@ -37,17 +38,18 @@ vi.mock("../src/lib/api", () => ({
       homePath: "/local", runtime: fixture.desktop ? "desktop" : "browser",
       shortcuts: [], finderDrop: fixture.supported,
     }),
-    listProfiles: async () => [profile],
+    listProfiles: async () => [profile, otherProfile],
     listGroups: async () => [],
     credentialStatus: async () => ({ available: false, supported: true }),
     listDirectory: (path: string | null) => fixture.local(path),
     listRemoteDirectory: (_session: string, path: string) => fixture.remote(path),
-    probeConnection: async (_profile: string, attemptId: string) => ({
-      attemptId, host: profile.host, port: 22, trusted: true,
-      identity: { algorithm: "ssh-ed25519", fingerprint: "SHA256:test" },
-    }),
+    probeConnection: async (profileId: string, attemptId: string) => {
+      fixture.profileId = profileId;
+      return { attemptId, host: profile.host, port: 22, trusted: true,
+        identity: { algorithm: "ssh-ed25519", fingerprint: "SHA256:test" } };
+    },
     authenticateConnection: async () => ({
-      sessionId: `session-${++fixture.session}`, profileId: profile.id, initialPath: "/remote", warning: null,
+      sessionId: `session-${++fixture.session}`, profileId: fixture.profileId, initialPath: "/remote", warning: null,
     }),
     cancelConnection: async () => {}, disconnectSession: async () => {},
     transferSnapshot: async () => ({ revision: 0, concurrency: 3, jobs: [] }),
@@ -81,6 +83,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   fixture.desktop = true; fixture.supported = true; fixture.occluded = false;
   fixture.session = 0; fixture.listener = null;
+  fixture.profileId = profile.id;
   fixture.unlisten.mockReset();
   fixture.subscribe.mockReset().mockImplementation(async (listener) => {
     fixture.listener = listener;
@@ -174,6 +177,19 @@ it("断开重连不能将旧原生票据用于新会话", async () => {
   expect(fixture.upload).not.toHaveBeenCalled();
   emit("enter"); emit("drop");
   await waitFor(() => expect(fixture.upload).toHaveBeenCalledExactlyOnceWith(paths, "session-2", "/remote"));
+});
+
+it("切换再返回仍连接的原服务器，旧 Finder 票据不能恢复", async () => {
+  await workspace();
+  emit("enter");
+  fireEvent.click(screen.getByRole("button", { name: /另一个 Finder 连接/ }));
+  await connect();
+  fireEvent.click(screen.getByRole("button", { name: /Finder 验收/ }));
+  expect(within(screen.getByRole("navigation", { name: "已保存连接" })).getAllByText("已连接")).toHaveLength(2);
+  emit("drop");
+  expect(fixture.upload).not.toHaveBeenCalled();
+  emit("enter"); emit("drop");
+  await waitFor(() => expect(fixture.upload).toHaveBeenCalledExactlyOnceWith(paths, "session-1", "/remote"));
 });
 
 it("原生批次校验失败会提示错误，不改用其他上传入口", async () => {

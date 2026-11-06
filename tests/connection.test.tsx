@@ -423,8 +423,8 @@ it("相对导航以最后接收的规范目录为基准，不受旧响应影响"
   const password = await readyPassword();
   fireEvent.change(password, { target: { value: "test-password" } });
   fireEvent.submit(password.closest("form")!);
-  const input = await screen.findByLabelText("远程路径");
-  await waitFor(() => expect(input).toBeEnabled());
+  await waitFor(() => expect(screen.getByLabelText("远程路径")).toBeEnabled());
+  const input = screen.getByLabelText("远程路径");
   const go = (value: string) => {
     fireEvent.change(input, { target: { value } });
     fireEvent.submit(input.closest("form")!);

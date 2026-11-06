@@ -9,6 +9,7 @@ const fixture = vi.hoisted(() => ({
   local: vi.fn(),
   remote: vi.fn(),
   session: 0,
+  profileId: "",
 }));
 
 const profile = {
@@ -16,6 +17,7 @@ const profile = {
   host: "test.example.invalid", port: 22, username: "tester", authMethod: "password",
   privateKeyPath: null, remotePath: "/remote",
 };
+const otherProfile = { ...profile, id: "e381864b-f0c3-4c9c-b67a-62702a98b187", name: "另一个拖放连接" };
 
 vi.mock("../src/lib/api", () => ({
   get isDesktop() { return fixture.desktop; },
@@ -23,17 +25,18 @@ vi.mock("../src/lib/api", () => ({
   errorCode: () => undefined,
   api: {
     getEnvironment: async () => ({ homePath: "/local", runtime: fixture.desktop ? "desktop" : "browser", shortcuts: [] }),
-    listProfiles: async () => [profile],
+    listProfiles: async () => [profile, otherProfile],
     listGroups: async () => [],
     credentialStatus: async () => ({ available: false, supported: true }),
     listDirectory: (path: string | null) => fixture.local(path),
     listRemoteDirectory: (_session: string, path: string) => fixture.remote(path),
-    probeConnection: async (_profile: string, attemptId: string) => ({
-      attemptId, host: profile.host, port: 22, trusted: true,
-      identity: { algorithm: "ssh-ed25519", fingerprint: "SHA256:test" },
-    }),
+    probeConnection: async (profileId: string, attemptId: string) => {
+      fixture.profileId = profileId;
+      return { attemptId, host: profile.host, port: 22, trusted: true,
+        identity: { algorithm: "ssh-ed25519", fingerprint: "SHA256:test" } };
+    },
     authenticateConnection: async () => ({
-      sessionId: `session-${++fixture.session}`, profileId: profile.id, initialPath: "/remote", warning: null,
+      sessionId: `session-${++fixture.session}`, profileId: fixture.profileId, initialPath: "/remote", warning: null,
     }),
     cancelConnection: async () => {},
     disconnectSession: async () => {},
@@ -93,6 +96,7 @@ function start(name: string, data = dataTransfer()) {
 beforeEach(() => {
   fixture.desktop = true;
   fixture.session = 0;
+  fixture.profileId = profile.id;
   fixture.enqueue.mockReset().mockResolvedValue(["job"]);
   fixture.local.mockReset().mockResolvedValue(local);
   fixture.remote.mockReset().mockResolvedValue(remote);
@@ -242,6 +246,21 @@ it("拖动期间断开重连后不能借用新会话", async () => {
   await connect();
   fireEvent.drop(dropZone("remote"), { dataTransfer: data });
   expect(fixture.enqueue).not.toHaveBeenCalled();
+});
+
+it("切到另一服务器再切回原会话，也不能恢复旧拖放令牌", async () => {
+  await workspace();
+  const old = start("a.txt");
+  fireEvent.click(screen.getByRole("button", { name: /另一个拖放连接/ }));
+  await connect();
+  fireEvent.click(screen.getByRole("button", { name: /拖放验收/ }));
+  expect(within(screen.getByRole("navigation", { name: "已保存连接" })).getAllByText("已连接")).toHaveLength(2);
+  fireEvent.drop(dropZone("remote"), { dataTransfer: old });
+  expect(fixture.enqueue).not.toHaveBeenCalled();
+  fireEvent.drop(dropZone("remote"), { dataTransfer: start("a.txt") });
+  await waitFor(() => expect(fixture.enqueue).toHaveBeenCalledExactlyOnceWith([
+    { sessionId: "session-1", direction: "upload", sourcePath: "/local/a.txt", destinationDir: "/remote" },
+  ]));
 });
 
 it.each(["escape", "dragend"] as const)("%s 取消拖动并清除目标状态", async (action) => {

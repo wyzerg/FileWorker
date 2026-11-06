@@ -59,7 +59,7 @@ describe("connection groups", () => {
     await user.click(screen.getByRole("button", { name: "生产 1" }));
     expect(screen.queryByRole("button", { name: "Alphaalpha.example" })).not.toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual(["production"]);
-    first.rerender(sidebar({ groups, connectedId: "beta" }));
+    first.rerender(sidebar({ groups, connectedIds: ["beta"] }));
     expect(screen.getByRole("button", { name: "生产 1" })).toHaveAttribute("aria-expanded", "false");
     first.unmount();
     render(sidebar({ groups }));
@@ -76,7 +76,7 @@ describe("connection groups", () => {
     view.rerender(sidebar({ groups, selectedId: "alpha" }));
     expect(screen.getByRole("button", { name: "Alphaalpha.example" })).toHaveAttribute("aria-pressed", "true");
     await user.click(screen.getByRole("button", { name: "生产 1" }));
-    view.rerender(sidebar({ groups: [...groups], selectedId: "alpha", connectedId: "alpha" }));
+    view.rerender(sidebar({ groups: [...groups], selectedId: "alpha", connectedIds: ["alpha"] }));
     expect(screen.getByRole("button", { name: "生产 1" })).toHaveAttribute("aria-expanded", "false");
     view.rerender(sidebar({ groups, selectedId: "beta" }));
     view.rerender(sidebar({ groups, selectedId: "alpha" }));
@@ -120,11 +120,17 @@ describe("connection groups", () => {
 });
 
 describe("profile context menus", () => {
+  it("shows every live connection badge, not only the selected profile", () => {
+    render(sidebar({ selectedId: "beta", connectedIds: ["alpha", "beta"] }));
+    expect(screen.getAllByText("已连接")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Alphaalpha.example" })).toHaveAccessibleDescription("已连接");
+    expect(screen.getByRole("button", { name: "Betabeta.example" })).toHaveAccessibleDescription("已连接");
+  });
   it("suppresses the native menu and targets the right-clicked profile without changing selection", () => {
     const selected: string[] = [];
     const opened: unknown[] = [];
     render(sidebar({
-      selectedId: "alpha", connectedId: "alpha",
+      selectedId: "alpha", connectedIds: ["alpha"],
       onSelect: (id) => selected.push(id),
       onProfileMenu: (profile, anchor) => opened.push({ profile, anchor }),
     }));

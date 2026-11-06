@@ -85,13 +85,13 @@ for (const theme of ["dark", "light"] as const) {
       const queue = page.getByRole("region", { name: "传输队列" });
       await expect(queue.locator(".transfer-row")).toHaveCount(2);
       await expect(queue.locator(".transfer-direction.upload")).toHaveCount(2);
-      await expect(queue.locator(".transfer-file > span").first()).toHaveText("/remote");
+      await expect(queue.locator(".transfer-file > span").first()).toHaveText("拖放验收 · /remote");
       await expect(remotePane).not.toHaveClass(/file-pane--drop-target/u);
       await remotePane.getByRole("row").filter({ hasText: "remote.txt" })
         .dragTo(localPane.locator(".file-list-container"), { targetPosition: { x: 80, y: 160 } });
       await expect(queue.locator(".transfer-row")).toHaveCount(3);
       await expect(queue.locator(".transfer-direction.download")).toHaveCount(1);
-      await expect(queue.locator(".transfer-file > span").last()).toHaveText("/local");
+      await expect(queue.locator(".transfer-file > span").last()).toHaveText("拖放验收 · /local");
       await expect(page.getByLabel("选择 本地子目录")).toBeDisabled();
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
       expect(errors).toEqual([]);

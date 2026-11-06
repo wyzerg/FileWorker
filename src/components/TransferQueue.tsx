@@ -15,8 +15,8 @@ const remaining = (seconds: number | null) => seconds === null ? "" : seconds < 
 const conflictKey = (job: TransferJob) => JSON.stringify([job.sessionId, job.id, job.attempt]);
 type ResolveConflict = (id: string, policy: ConflictPolicy) => void | Promise<void>;
 
-function TransferConflictDialog({ job, onResolve, onResolved, onClose }: {
-  job: TransferJob; onResolve: ResolveConflict; onResolved: () => void; onClose: () => void;
+function TransferConflictDialog({ job, sessionName, onResolve, onResolved, onClose }: {
+  job: TransferJob; sessionName?: string; onResolve: ResolveConflict; onResolved: () => void; onClose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -37,6 +37,7 @@ function TransferConflictDialog({ job, onResolve, onResolved, onClose }: {
   }
   return <Dialog title="同名文件" onClose={onClose} busy={busy}>
     <div className="dialog-body"><p className="confirm-message">目标已存在「{job.name}」</p>
+      {sessionName && <p className="muted">{sessionName}</p>}
       <p className="conflict-path">{job.destinationPath ?? `${job.destinationDir.replace(/\/$/u, "")}/${job.name}`}</p>
       {error && <p className="form-error" role="alert">{error}</p>}</div>
     <footer className="dialog-footer conflict-actions">
@@ -47,9 +48,11 @@ function TransferConflictDialog({ job, onResolve, onResolved, onClose }: {
   </Dialog>;
 }
 
-export function TransferQueue({ snapshot, sessionId, dialogBlocked = false, onCancel, onRetry, onResolve, onConcurrency, onClear }: {
+export function TransferQueue({ snapshot, sessionId, sessionIds, sessionNames, dialogBlocked = false, onCancel, onRetry, onResolve, onConcurrency, onClear }: {
   snapshot: TransferSnapshot;
   sessionId: string | null;
+  sessionIds?: readonly string[];
+  sessionNames?: Readonly<Record<string, string>>;
   dialogBlocked?: boolean;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
@@ -61,23 +64,26 @@ export function TransferQueue({ snapshot, sessionId, dialogBlocked = false, onCa
   const [tab, setTab] = useState("全部");
   const [conflictId, setConflictId] = useState<string | null>(null);
   const prompted = useRef(new Set<string>());
-  const conflicts = snapshot.jobs.filter((job) => job.state === "conflict" && job.sessionId === sessionId);
+  const live = (id: string) => sessionIds ? sessionIds.includes(id) : id === sessionId;
+  const conflicts = snapshot.jobs.filter((job) => job.state === "conflict" && live(job.sessionId));
   const conflict = conflicts.find((job) => conflictKey(job) === conflictId);
   useEffect(() => {
-    const pending = snapshot.jobs.filter((job) => job.state === "conflict" && job.sessionId === sessionId);
-    const keys = new Set(pending.map(conflictKey));
+    const keys = new Set(conflicts.map(conflictKey));
     for (const key of prompted.current) if (!keys.has(key)) prompted.current.delete(key);
-    if (dialogBlocked || pending.some((job) => conflictKey(job) === conflictId)) return;
+    if (dialogBlocked || conflicts.some((job) => conflictKey(job) === conflictId)) return;
+    const pending = conflicts.filter((job) => job.sessionId === sessionId);
     const next = pending.find((job) => !prompted.current.has(conflictKey(job)));
     if (next) {
       const key = conflictKey(next);
       prompted.current.add(key);
       setConflictId(key);
     } else if (conflictId !== null) setConflictId(null);
-  }, [snapshot.jobs, sessionId, dialogBlocked, conflictId]);
+  }, [snapshot.jobs, sessionId, sessionIds, dialogBlocked, conflictId]);
   const deferConflicts = () => {
     // Closing defers all currently pending prompts, not one popup at a time.
-    for (const job of conflicts) prompted.current.add(conflictKey(job));
+    for (const job of conflicts) {
+      if (job.sessionId === (conflict?.sessionId ?? sessionId)) prompted.current.add(conflictKey(job));
+    }
     setConflictId(null);
   };
   const filters = {
@@ -110,7 +116,9 @@ export function TransferQueue({ snapshot, sessionId, dialogBlocked = false, onCa
           {job.direction === "upload" ? <ArrowUpFromLine size={16} /> : <ArrowDownToLine size={16} />}
         </span>
         <div className="transfer-file"><strong title={job.name}>{job.name}</strong>
-          <span title={`${job.sourcePath} → ${job.destinationPath ?? job.destinationDir}`}>{job.destinationPath ?? job.destinationDir}</span>
+          <span title={`${sessionNames?.[job.sessionId] ? `${sessionNames[job.sessionId]} · ` : ""}${job.sourcePath} → ${job.destinationPath ?? job.destinationDir}`}>
+            {sessionNames?.[job.sessionId] && `${sessionNames[job.sessionId]} · `}{job.destinationPath ?? job.destinationDir}
+          </span>
           {(job.error || job.warning) && <span className={job.error && job.state === "failed" ? "transfer-error" : "transfer-note"}
             title={job.error ?? job.warning ?? ""}>{job.error ?? job.warning}</span>}
         </div>
@@ -123,19 +131,19 @@ export function TransferQueue({ snapshot, sessionId, dialogBlocked = false, onCa
         <div className="transfer-state"><span>{job.state === "canceling" && <LoaderCircle size={11} className="spinning" />}{labels[job.state]}</span>
           {job.state === "running" && job.etaSeconds !== null && <small>{remaining(job.etaSeconds)}</small>}</div>
         <div className="transfer-actions">
-          {job.state === "conflict" && <IconButton label={`处理 ${job.name} 的同名文件`} disabled={job.sessionId !== sessionId}
+          {job.state === "conflict" && <IconButton label={`处理 ${job.name} 的同名文件`} disabled={!live(job.sessionId)}
             onClick={() => {
               const key = conflictKey(job);
               prompted.current.add(key);
               setConflictId(key);
             }}><Copy size={15} /></IconButton>}
-          {["failed", "canceled"].includes(job.state) && <IconButton label={`重试 ${job.name}`} disabled={job.sessionId !== sessionId}
+          {["failed", "canceled"].includes(job.state) && <IconButton label={`重试 ${job.name}`} disabled={!live(job.sessionId)}
             onClick={() => onRetry(job.id)}><RefreshCw size={15} /></IconButton>}
           {unfinished(job) && <IconButton label={`取消 ${job.name}`} disabled={job.state === "canceling"} onClick={() => onCancel(job.id)}><X size={15} /></IconButton>}
         </div>
       </div>)}
     </div> : <div className="queue-empty"><Inbox size={25} strokeWidth={1.3} /><span>{tab === "全部" ? "暂无传输任务" : "暂无此类任务"}</span></div>)}
-    {conflict && !dialogBlocked && <TransferConflictDialog key={conflictKey(conflict)} job={conflict} onResolve={onResolve}
+    {conflict && !dialogBlocked && <TransferConflictDialog key={conflictKey(conflict)} job={conflict} sessionName={sessionNames?.[conflict.sessionId]} onResolve={onResolve}
       onClose={deferConflicts} onResolved={() => {
         setConflictId((current) => current === conflictKey(conflict) ? null : current);
       }} />}

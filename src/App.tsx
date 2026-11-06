@@ -46,11 +46,11 @@ export default function App() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [activePane, setActivePane] = useState("local");
   const requestId = useRef(0);
-  const completedTargets = useRef({ local: new Set<string>(), remote: new Set<string>() });
+  const completedTargets = useRef({ local: new Set<string>(), remote: new Map<string, Set<string>>() });
   const menuTrigger = useRef<HTMLButtonElement>(null);
   const pendingConnection = useRef<{ id: string; input?: AuthenticationInput } | null>(null);
   const selectedProfile = profiles.find((profile) => profile.id === selectedId) ?? null;
-  const remote = useRemoteConnection(selectedProfile, setNotice);
+  const remote = useRemoteConnection(selectedProfile, setNotice, profiles);
   useEffect(() => {
     const pending = pendingConnection.current;
     if (!pending || editor || selectedProfile?.id !== pending.id) return;
@@ -77,10 +77,17 @@ export default function App() {
     const destination = job.destinationPath;
     const parent = destination ? destination.slice(0, destination.lastIndexOf("/")) || "/" : job.destinationDir;
     if (job.direction === "download") completedTargets.current.local.add(parent);
-    else completedTargets.current.remote.add(JSON.stringify([job.sessionId, parent]));
+    else {
+      const targets = completedTargets.current.remote.get(job.sessionId) ?? new Set<string>();
+      targets.add(parent); completedTargets.current.remote.set(job.sessionId, targets);
+    }
   }, setNotice);
-  const hasActiveTransfers = Boolean(remote.session && transfers.snapshot.jobs.some((job) =>
-    job.sessionId === remote.session!.sessionId && ["queued", "running", "canceling", "conflict"].includes(job.state)));
+  function profileHasTransfers(id: string) {
+    const session = remote.sessions.find((item) => item.profileId === id);
+    return Boolean(session && transfers.snapshot.jobs.some((job) =>
+      job.sessionId === session.sessionId && ["queued", "running", "canceling", "conflict"].includes(job.state)));
+  }
+  const hasActiveTransfers = Boolean(selectedId && profileHasTransfers(selectedId));
   const remoteFiles = useRemoteFiles({
     sessionId: remote.session?.sessionId ?? null, listing: remote.listing, mutationsBlocked: hasActiveTransfers,
     onRefresh: (directory) => { void remote.navigate(directory); }, onNotice: setNotice,
@@ -101,13 +108,15 @@ export default function App() {
       completedTargets.current.local.clear();
       if (refresh) void navigate(listing.path);
     }
-    if (!remote.loading) {
-      const refresh = remote.listing && remote.path === remote.listing.path && remote.session
-        && completedTargets.current.remote.has(JSON.stringify([remote.session.sessionId, remote.listing.path]));
-      completedTargets.current.remote.clear();
-      if (refresh) void remote.navigate(remote.listing!.path);
+    const liveSessions = new Set(remote.sessions.map((session) => session.sessionId));
+    for (const id of completedTargets.current.remote.keys()) {
+      if (!liveSessions.has(id)) completedTargets.current.remote.delete(id);
     }
-  }, [transfers.snapshot.revision, loading, listing, path, navigate, remote.loading, remote.listing, remote.path, remote.session, remote.navigate]);
+    if (!remote.loading && remote.session && remote.listing && remote.path === remote.listing.path) {
+      const targets = completedTargets.current.remote.get(remote.session.sessionId);
+      if (targets?.delete(remote.listing.path)) void remote.navigate(remote.listing.path);
+    }
+  }, [transfers.snapshot.revision, loading, listing, path, navigate, remote.loading, remote.listing, remote.path, remote.session, remote.sessions, remote.navigate]);
   const transferReady = isDesktop && Boolean(remote.session && remote.listing && listing)
     && !remote.loading && !loading && !transfers.submitting;
   const drag = useTransferDrag({
@@ -146,24 +155,26 @@ export default function App() {
   const newProfile = (groupId?: string | null) => {
     if (!profilesLoading) { setNotice(""); setProfileMenu(null); setEditor({ profile: null, groupId }); }
   };
-  const transferWarning = "当前连接仍有未结束的传输，请先完成或取消任务，再断开或切换连接";
+  const transferWarning = "此连接仍有未结束的传输，请先完成或取消任务，再断开、重连、删除或更改认证身份";
   function selectProfile(id: string) {
-    if (id !== selectedId && hasActiveTransfers) { setNotice(transferWarning); return; }
     setSelectedId(id); setMobileSidebarOpen(false); setActivePane("remote");
   }
   function requestConnect(id: string, input?: AuthenticationInput) {
-    if (!input && (remote.session?.profileId === id || remote.attempt?.profile.id === id)) return;
-    if (hasActiveTransfers) { setNotice(transferWarning); return; }
-    remote.cancel();
+    if (!input && (remote.sessions.some((session) => session.profileId === id) || remote.attempt?.profile.id === id)) {
+      selectProfile(id); return;
+    }
+    if (input && profileHasTransfers(id)) { setNotice(transferWarning); return; }
+    if (input) remote.disconnectProfile(id);
     pendingConnection.current = { id, input };
     setSelectedId(id); setConnectionRequest((value) => value + 1);
     setActivePane("remote"); setMobileSidebarOpen(false);
   }
   async function saveProfile(profile: ConnectionProfile, input?: AuthenticationInput, connect = false) {
-    const changesActiveIdentity = selectedProfile?.id === profile.id && credentialIdentity(selectedProfile) !== credentialIdentity(profile);
-    if (hasActiveTransfers && (connect || changesActiveIdentity)) throw new Error(transferWarning);
+    const previous = profiles.find((item) => item.id === profile.id);
+    const changesIdentity = previous && credentialIdentity(previous) !== credentialIdentity(profile);
+    if (profileHasTransfers(profile.id) && (connect || changesIdentity)) throw new Error(transferWarning);
     const saved = await api.saveProfile(profile);
-    const previous = profiles.find((item) => item.id === saved.id);
+    if (changesIdentity) remote.disconnectProfile(saved.id);
     if (previous && (previous.remotePath !== saved.remotePath || previous.host.toLowerCase() !== saved.host.toLowerCase()
       || previous.port !== saved.port || previous.username !== saved.username)) forgetRemoteLocation(saved.id);
     setProfiles((previous) => {
@@ -171,7 +182,7 @@ export default function App() {
       return index === -1 ? [...previous, saved] : previous.map((item) => item.id === saved.id ? saved : item);
     });
     if (connect && isDesktop) requestConnect(saved.id, input);
-    else if (!remote.session && !remote.attempt) setSelectedId(saved.id);
+    else if (!selectedId || (!previous && !remote.session && !remote.attempt)) setSelectedId(saved.id);
     setNotice(connect && !isDesktop ? "配置已保存；连接服务器请使用桌面应用" : "连接配置已保存");
   }
   async function duplicateProfile(profile: ConnectionProfile) {
@@ -184,10 +195,11 @@ export default function App() {
   }
   async function deleteProfile() {
     if (!deleteTarget || mutationBusy) return;
-    if (deleteTarget.id === remote.session?.profileId && hasActiveTransfers) { setMutationError(transferWarning); return; }
+    if (profileHasTransfers(deleteTarget.id)) { setMutationError(transferWarning); return; }
     setMutationBusy(true); setMutationError("");
     try {
       await api.deleteProfile(deleteTarget.id);
+      remote.disconnectProfile(deleteTarget.id);
       forgetRemoteLocation(deleteTarget.id);
       const remaining = profiles.filter((profile) => profile.id !== deleteTarget.id);
       setProfiles(remaining);
@@ -244,7 +256,8 @@ export default function App() {
       </header>
       <div className="workspace-body">
         {mobileSidebarOpen && <button type="button" className="sidebar-scrim" aria-label="关闭侧栏" onClick={() => setMobileSidebarOpen(false)} />}
-        <Sidebar profiles={profiles} groups={groups} selectedId={selectedId} environment={environment} loading={profilesLoading} connectedId={remote.session?.profileId}
+        <Sidebar profiles={profiles} groups={groups} selectedId={selectedId} environment={environment} loading={profilesLoading}
+          connectedIds={remote.sessions.map((session) => session.profileId)}
           localPath={listing?.path ?? ""} onNew={newProfile}
           onNewGroup={() => setGroupEditor({ group: null })} onEditGroup={(group) => setGroupEditor({ group })}
           onDeleteGroup={(group) => { setMutationError(""); setDeleteGroupTarget(group); }}
@@ -278,7 +291,8 @@ export default function App() {
                 try { const nextPath = await api.chooseDirectory(); if (nextPath) void navigate(nextPath); }
                 catch (cause) { setNotice(errorMessage(cause)); }
               }} />
-            <FilePane side="remote" path={remote.path} parentPath={remote.parentPath} listing={remote.listing} profile={selectedProfile} onNewProfile={newProfile}
+            <FilePane key={remote.session?.sessionId ?? selectedId ?? "remote"} side="remote"
+              path={remote.path} parentPath={remote.parentPath} listing={remote.listing} profile={selectedProfile} onNewProfile={newProfile}
               loading={remote.loading} error={remote.error} preview={!isDesktop}
               connected={Boolean(remote.session)} connecting={Boolean(remote.attempt)}
               onConnect={() => { void remote.connect(); }} onDisconnect={() => {
@@ -307,6 +321,9 @@ export default function App() {
               onMenu={openCurrentMenu} profileMenuTrigger={profileMenu?.trigger} />
           </div>
           <TransferQueue snapshot={transfers.snapshot} sessionId={remote.session?.sessionId ?? null}
+            sessionIds={remote.sessions.map((session) => session.sessionId)}
+            sessionNames={Object.fromEntries(remote.sessions.map((session) => [session.sessionId,
+              profiles.find((profile) => profile.id === session.profileId)?.name ?? session.profileId]))}
             dialogBlocked={dialogOpen}
             onCancel={(id) => { void transfers.cancel(id); }} onRetry={(id) => { void transfers.retry(id); }}
             onResolve={transfers.resolve}

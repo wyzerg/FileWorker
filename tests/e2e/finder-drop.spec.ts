@@ -123,7 +123,7 @@ for (const [theme, width] of [["dark", 1280], ["light", 800]] as const) {
     await nativeEvent(page, "drop", position);
     await expect(page.locator(".transfer-row")).toHaveCount(2);
     await expect(page.locator(".transfer-direction.upload")).toHaveCount(2);
-    await expect(page.locator(".transfer-file > span").first()).toHaveText("/remote");
+    await expect(page.locator(".transfer-file > span").first()).toHaveText("Finder 验收 · /remote");
     await expect(pane).not.toHaveClass(/file-pane--drop-target/u);
     expect(await page.evaluate(() => (window as unknown as { __finderFixture: { enqueues: () => number } }).__finderFixture.enqueues())).toBe(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
