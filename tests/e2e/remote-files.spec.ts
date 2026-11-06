@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
+import { expectReadableText } from "./visual-helpers";
 
-async function installFixture(page: Page, options: { failDeleteOnce?: string; extraEntries?: number } = {}) {
+async function installFixture(page: Page, options: { failDeleteOnce?: string; extraEntries?: number; forgetError?: string } = {}) {
   await page.addInitScript((options) => {
     const profile = {
       id: "c83f782d-1334-40f3-9905-ed2f9c4ae61f", name: "测试环境应用服务器", host: "isolated.example.invalid",
@@ -49,6 +50,9 @@ async function installFixture(page: Page, options: { failDeleteOnce?: string; ex
               }
               return { kind: "text", path: args.path, text: `<script>不会执行</script>\n${"2026-11-05 INFO 服务运行正常\n".repeat(40)}${"long-log-field".repeat(150)}` };
             case "remote_file_properties": return { path: args.path, kind: "file", size: 4096, modifiedMs: 1793836800000, permissions: "0600", uid: 501, gid: 20 };
+            case "forget_credential":
+              if (options.forgetError) throw { message: options.forgetError };
+              return;
             case "mutate_remote_file": {
               const action = args.action as { kind: string; name?: string };
               if (action.kind === "createDirectory") entries = [...entries, entry(action.name!, true)];
@@ -265,7 +269,7 @@ test("远程工具栏、右键与只读预览在明暗、矮窗和窄视口内�
   expect(errors).toEqual([]);
 });
 
-test("双栏的路径、筛选、工具栏、表头和列表逐行对齐，连接状态不改变布局", async ({ page }, testInfo) => {
+test("筛选和操作位于同一行，双栏逐行对齐且连接状态不改变布局", async ({ page }, testInfo) => {
   await installFixture(page);
   for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: theme });
@@ -283,7 +287,7 @@ test("双栏的路径、筛选、工具栏、表头和列表逐行对齐，连�
         const localHeader = (await local.locator("th.column-name").boundingBox())!;
         const remoteHeader = (await remote.locator("th.column-name").boundingBox())!;
         expect(Math.abs(localHeader.y - remoteHeader.y), "两侧可见的文件表头应位于同一水平线").toBeLessThan(1);
-        for (const selector of [".pane-heading", ".pane-toolbar", ".pane-filter-row", '[role="toolbar"]', ".file-list-container", ".pane-footer"]) {
+        for (const selector of [".pane-heading", ".pane-toolbar", '[role="toolbar"]', ".file-list-container", ".pane-footer"]) {
           const left = (await local.locator(selector).boundingBox())!;
           const right = (await remote.locator(selector).boundingBox())!;
           expect(Math.abs(left.y - right.y), `${selector} 顶部应对齐`).toBeLessThan(1);
@@ -291,6 +295,22 @@ test("双栏的路径、筛选、工具栏、表头和列表逐行对齐，连�
         }
         await expect(local.getByRole("toolbar", { name: "本地文件操作" })).toBeVisible();
         await expect(remote.getByRole("toolbar", { name: "远程文件操作" })).toBeVisible();
+        for (const [pane, side] of [[local, "本地"], [remote, "远程"]] as const) {
+          const toolbar = pane.getByRole("toolbar", { name: `${side}文件操作` });
+          const bounds = (await toolbar.boundingBox())!;
+          expect(bounds.height, "合并的操作行不能因宽度或连接状态换行").toBeLessThanOrEqual(36);
+          const filter = toolbar.getByRole("textbox", { name: `筛选${side}文件` });
+          await expect(filter).toBeVisible();
+          expect((await filter.boundingBox())!.width, "筛选框不能被操作图标挤没").toBeGreaterThanOrEqual(64);
+          for (const button of await toolbar.getByRole("button").all()) {
+            if (!(await button.isVisible())) continue;
+            const buttonBounds = (await button.boundingBox())!;
+            expect(buttonBounds.x).toBeGreaterThanOrEqual(bounds.x);
+            expect(buttonBounds.x + buttonBounds.width).toBeLessThanOrEqual(bounds.x + bounds.width);
+            expect(buttonBounds.y).toBeGreaterThanOrEqual(bounds.y);
+            expect(buttonBounds.y + buttonBounds.height).toBeLessThanOrEqual(bounds.y + bounds.height);
+          }
+        }
         expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
       }
       await page.screenshot({ path: testInfo.outputPath(`${theme}-aligned-${viewport.width}-${viewport.height}.png`) });
@@ -308,7 +328,9 @@ test("窄视口切换本地和远程时，两侧工具栏保持完整且不溢�
     const toolbar = pane.getByRole("toolbar", { name: `${side}文件操作` });
     await expect(toolbar).toBeInViewport();
     const bounds = (await toolbar.boundingBox())!;
+    await expect(toolbar.getByRole("textbox", { name: `筛选${side}文件` })).toBeVisible();
     for (const button of await toolbar.getByRole("button").all()) {
+      if (!(await button.isVisible())) continue;
       const buttonBounds = (await button.boundingBox())!;
       expect(buttonBounds.x).toBeGreaterThanOrEqual(bounds.x);
       expect(buttonBounds.x + buttonBounds.width).toBeLessThanOrEqual(bounds.x + bounds.width);
@@ -317,5 +339,113 @@ test("窄视口切换本地和远程时，两侧工具栏保持完整且不溢�
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
     await page.screenshot({ path: testInfo.outputPath(`toolbar-mobile-${side === "本地" ? "local" : "remote"}.png`) });
+  }
+});
+
+test("窄双栏的更多操作保留多选目标，菜单可关闭并将焦点还给触发器", async ({ page }) => {
+  await installFixture(page);
+  await page.setViewportSize({ width: 800, height: 580 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+  const remote = page.getByRole("region", { name: "远程文件", exact: true });
+  await remote.getByRole("checkbox", { name: "选择全部远程文件" }).check();
+  const more = remote.getByRole("button", { name: "更多文件操作" });
+  await more.click();
+  const menu = page.getByRole("menu", { name: "远程文件操作" });
+  await expect(menu.getByRole("menuitem", { name: "重命名", exact: true })).toBeDisabled();
+  await expect(menu.getByRole("menuitem", { name: "删除", exact: true })).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await expect(more).toBeFocused();
+  await more.click();
+  await more.click();
+  await expect(menu).toHaveCount(0);
+  await more.click();
+  await menu.getByRole("menuitem", { name: "删除", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "删除远程项目" });
+  await expect(dialog.getByRole("listitem")).toHaveCount(2);
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  expect(await deletionPaths(page)).toEqual([]);
+});
+
+test("明暗主题选中行的名称、大小、日期与连接地址保持可读", async ({ page }) => {
+  await installFixture(page);
+  for (const theme of ["dark", "light"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await page.goto("/");
+    await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+    const remote = page.getByRole("region", { name: "远程文件", exact: true });
+    await remote.getByRole("checkbox", { name: "选择全部远程文件" }).check();
+    await expect(remote.locator("tr.selected")).toHaveCount(2);
+    await expectReadableText(page.locator(
+      ".file-table tr.selected .entry-name > span, .file-table tr.selected .column-size, .file-table tr.selected .column-modified, .profile-item.active .profile-description > span, .profile-item.active .connection-badge",
+    ), `${theme}: 选中状态`);
+  }
+});
+
+test("右键后取消勾选同一文件会关闭旧菜单，后续删除只包含仍选中的项目", async ({ page }) => {
+  await installFixture(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+  const remote = page.getByRole("region", { name: "远程文件", exact: true });
+  await remote.getByRole("checkbox", { name: "选择全部远程文件" }).check();
+  await remote.getByText("应用程序运行日志.log", { exact: true }).click({ button: "right" });
+  await expect(page.getByRole("menu", { name: "远程文件操作" })).toBeVisible();
+  await remote.getByRole("checkbox", { name: "选择 应用程序运行日志.log", exact: true }).uncheck();
+  await expect(page.getByRole("menu", { name: "远程文件操作" })).toHaveCount(0);
+  await remote.getByRole("button", { name: "删除", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "删除远程项目" });
+  await expect(dialog).toContainText("/remote/status.png");
+  await expect(dialog).not.toContainText("/remote/应用程序运行日志.log");
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  expect(await deletionPaths(page)).toEqual([]);
+});
+
+test("连接设置菜单锚定扳手，底部长提示不改变文件区高度并可展开关闭", async ({ page }, testInfo) => {
+  const message = `无法访问已存凭据：${"/an-isolated-long-path".repeat(24)}。请检查本机安全存储后重试。`;
+  await installFixture(page, { forgetError: message });
+  for (const theme of ["dark", "light"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    for (const viewport of [{ width: 1280, height: 820 }, { width: 800, height: 480 }, { width: 390, height: 844 }, { width: 390, height: 480 }]) {
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      if (viewport.width < 760) await page.getByRole("tab", { name: "远程", exact: true }).click();
+      await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+      const remote = page.getByRole("region", { name: "远程文件", exact: true });
+      await expect(remote.getByText("status.png", { exact: true })).toBeVisible();
+      const before = (await remote.locator(".file-list-container").boundingBox())!;
+      const settings = remote.getByRole("button", { name: "连接设置", exact: true });
+      await settings.click();
+      const menu = page.getByRole("menu", { name: /连接操作/u });
+      const triggerBounds = (await settings.boundingBox())!;
+      const menuBounds = (await menu.boundingBox())!;
+      expect(Math.abs(menuBounds.y - (triggerBounds.y + triggerBounds.height)), "菜单应从扳手下方打开").toBeLessThan(1);
+      await menu.getByRole("menuitem", { name: "忘记已存凭据" }).click();
+      const footer = page.locator(".app-statusbar");
+      await expect(footer.getByRole("alert")).toHaveText(message);
+      await expectReadableText(footer.locator(".status-notice-trigger > span"), `${theme}: 底部提示`);
+      const after = (await remote.locator(".file-list-container").boundingBox())!;
+      expect(after.y).toBe(before.y);
+      expect(after.height).toBe(before.height);
+      const footerBounds = (await footer.boundingBox())!;
+      expect(footerBounds.height, "通知必须复用状态栏，不增加行高").toBeLessThanOrEqual(27);
+      const detailsButton = footer.getByRole("button", { name: "查看完整提示" });
+      await detailsButton.click();
+      const details = page.getByRole("region", { name: "完整提示" });
+      await expect(details).toHaveText(message);
+      await expectReadableText(details, `${theme}: 完整提示`);
+      const detailsBounds = (await details.boundingBox())!;
+      expect(detailsBounds.x).toBeGreaterThanOrEqual(0);
+      expect(detailsBounds.x + detailsBounds.width).toBeLessThanOrEqual(viewport.width);
+      expect(detailsBounds.y).toBeGreaterThanOrEqual(0);
+      expect(detailsBounds.y + detailsBounds.height).toBeLessThanOrEqual(footerBounds.y);
+      expect(await details.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`${theme}-bottom-notice-${viewport.width}-${viewport.height}.png`) });
+      await page.keyboard.press("Escape");
+      await expect(details).toHaveCount(0);
+      await expect(detailsButton).toBeFocused();
+      await footer.getByRole("button", { name: "关闭提示" }).click();
+      await expect(footer.getByRole("alert")).toHaveCount(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    }
   }
 });

@@ -10,6 +10,6 @@
   const root = document.documentElement;
   root.dataset.theme = theme;
   root.style.colorScheme = theme;
-  root.style.backgroundColor = dark ? "#191b20" : "#e9edf1";
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#191b20" : "#e9edf1");
+  root.style.backgroundColor = dark ? "#191b1e" : "#eaedf0";
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#191b1e" : "#eaedf0");
 })();

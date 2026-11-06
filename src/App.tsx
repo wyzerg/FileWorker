@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, ArrowRightLeft, ArrowUpFromLine, CircleCheck, LoaderCircle, MoreHorizontal, PanelLeft, PlugZap, Plus, Trash2, Unplug, X } from "lucide-react";
+import { ArrowDownToLine, ArrowRightLeft, ArrowUpFromLine, CircleCheck, LoaderCircle, MoreHorizontal, PanelLeft, PlugZap, Plus, Trash2, Unplug } from "lucide-react";
 import { api, errorMessage, isDesktop } from "./lib/api";
 import type { AuthenticationInput, ConnectionGroup, ConnectionProfile, DirectoryListing, RuntimeEnvironment } from "./lib/types";
 import { Dialog } from "./components/Dialog";
@@ -21,6 +21,7 @@ import { credentialIdentity } from "./lib/useAuthentication";
 import { forgetRemoteLocation } from "./lib/remoteLocations";
 import { useRemoteFiles } from "./lib/useRemoteFiles";
 import { RemoteFileDialogs } from "./components/RemoteFileDialogs";
+import { StatusNotice } from "./components/StatusNotice";
 
 export default function App() {
   const [environment, setEnvironment] = useState<RuntimeEnvironment | null>(null);
@@ -213,11 +214,12 @@ export default function App() {
     finally { setMutationBusy(false); }
   }
   const closeProfileMenu = useCallback(() => setProfileMenu(null), []);
-  function openCurrentMenu() {
+  function openCurrentMenu(trigger: HTMLButtonElement) {
     if (!selectedProfile) return;
-    if (profileMenu) { setProfileMenu(null); return; }
-    const bounds = menuTrigger.current?.getBoundingClientRect();
-    setProfileMenu({ profile: selectedProfile, anchor: { x: bounds?.left ?? 16, y: bounds?.bottom ?? 100 }, trigger: menuTrigger.current });
+    const bounds = trigger.getBoundingClientRect();
+    setProfileMenu((previous) => previous?.trigger === trigger ? null : {
+      profile: selectedProfile, anchor: { x: bounds.left, y: bounds.bottom }, trigger,
+    });
   }
 
   return (
@@ -260,10 +262,9 @@ export default function App() {
             <div className="workspace-tools">
               <button type="button" className="button primary compact" onClick={() => newProfile()} disabled={profilesLoading} aria-label="添加 SFTP 连接"><Plus size={15} /><span>新建连接</span></button>
               <IconButton label="管理当前连接" ref={menuTrigger} disabled={!selectedProfile || mutationBusy} aria-haspopup="menu" aria-expanded={Boolean(profileMenu)}
-                onClick={openCurrentMenu}><MoreHorizontal size={18} /></IconButton>
+                onClick={(event) => openCurrentMenu(event.currentTarget)}><MoreHorizontal size={18} /></IconButton>
             </div>
           </div>
-          {notice && <div className="notice" role="alert"><span>{notice}</span><IconButton label="关闭提示" onClick={() => setNotice("")}><X size={15} /></IconButton></div>}
           <div className="panes">
             <FilePane side="local" listing={listing} path={path} onPathChange={setPath} onNavigate={(nextPath) => { void navigate(nextPath); }}
               transferEnabled={transferReady} onTransfer={(entries) => {
@@ -303,7 +304,7 @@ export default function App() {
               }}
               drag={drag.pane("remote")}
               externalDropTarget={finderDrop.target} dropRef={finderDrop.dropRef}
-              onMenu={openCurrentMenu} />
+              onMenu={openCurrentMenu} profileMenuTrigger={profileMenu?.trigger} />
           </div>
           <TransferQueue snapshot={transfers.snapshot} sessionId={remote.session?.sessionId ?? null}
             dialogBlocked={dialogOpen}
@@ -312,9 +313,10 @@ export default function App() {
             onConcurrency={(value) => { void transfers.concurrency(value); }} onClear={() => { void transfers.clear(); }} />
         </main>
       </div>
-      <footer className="app-statusbar">
+      <footer className={`app-statusbar ${notice ? "app-statusbar--notice" : ""}`}>
         <span className="status-left">{loading ? <LoaderCircle size={12} className="spinning" /> : <CircleCheck size={12} />}<span>{loading ? "正在读取目录" : isDesktop ? "本地文件可用" : "浏览器预览"}</span></span>
-        <span className="status-connection">{remote.session ? <PlugZap size={12} /> : <Unplug size={12} />}{selectedProfile ? `${selectedProfile.host} · ${remote.session ? "已连接" : remote.attempt ? "连接中" : "未连接"}` : "未连接服务器"}</span>
+        {notice && <StatusNotice key={notice} message={notice} onDismiss={() => setNotice("")} />}
+        <span className="status-connection">{remote.session ? <PlugZap size={12} /> : <Unplug size={12} />}<span>{selectedProfile ? `${selectedProfile.host} · ${remote.session ? "已连接" : remote.attempt ? "连接中" : "未连接"}` : "未连接服务器"}</span></span>
         <div className="status-rates"><span><ArrowUpFromLine size={11} />{formatBytes(rates.upload)}/s</span><span><ArrowDownToLine size={11} />{formatBytes(rates.download)}/s</span></div>
       </footer>
       {profileMenu && <ProfileMenu profile={profileMenu.profile} anchor={profileMenu.anchor} trigger={profileMenu.trigger} busy={mutationBusy} desktop={isDesktop}

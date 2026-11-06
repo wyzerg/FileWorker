@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { expectReadableText } from "./visual-helpers";
 
 test("外观偏好可以切换、记忆并跟随系统", async ({ page }) => {
   const errors: string[] = [];
@@ -25,7 +26,12 @@ test("框架代码尚未加载时就使用保存的深色背景", async ({ page 
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   expect(await page.locator("#root").innerHTML()).toBe("");
   expect(await page.locator("html").evaluate((element) => getComputedStyle(element).colorScheme)).toBe("dark");
-  expect(await page.locator("html").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe("rgb(25, 27, 32)");
+  const initialBackground = await page.locator("html").evaluate((element) => getComputedStyle(element).backgroundColor);
+  await page.unroute(/\/src\/main\.tsx(?:\?.*)?$/u);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "外观设置" })).toBeVisible();
+  expect(await page.locator("html").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe(initialBackground);
+  expect(await page.locator(".titlebar").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe(initialBackground);
 });
 
 test("明暗主题的工作区、菜单与表单在不同视口均可用", async ({ page }) => {
@@ -62,33 +68,31 @@ test("明暗主题的可用控件及次要文字保持可读对比度", async ({
     await page.emulateMedia({ colorScheme: theme });
     await page.goto("/");
     await expect(page.getByRole("button", { name: "添加 SFTP 连接" })).toBeEnabled();
-    const contrasts = await page.locator(
-      ".workspace-title, .runtime-label, .sidebar-section h2, .sidebar-no-connections, .pane-empty h3, .pane-empty p, .queue-title h2, .queue-empty, .app-statusbar, .button.primary, .file-table th",
-    ).evaluateAll((elements) => elements.map((element) => {
-      const rgb = (value: string) => value.match(/[\d.]+/g)!.slice(0, 3).map(Number);
-      const luminance = (value: string) => {
-        const linear = rgb(value).map((channel) => {
-          const scaled = channel / 255;
-          return scaled <= 0.04045 ? scaled / 12.92 : ((scaled + 0.055) / 1.055) ** 2.4;
-        });
-        return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
-      };
-      let ancestor: Element | null = element;
-      let background = "rgb(255, 255, 255)";
-      while (ancestor) {
-        const candidate = getComputedStyle(ancestor).backgroundColor;
-        if (candidate !== "rgba(0, 0, 0, 0)" && candidate !== "transparent") {
-          background = candidate; break;
-        }
-        ancestor = ancestor.parentElement;
+    await expectReadableText(page.locator(
+      ".workspace-title, .runtime-label, .sidebar-section h2, .sidebar-no-connections, .sidebar-item:not(:disabled), .pane-title > span, .pane-footer > span, .pane-empty h3, .pane-empty p, .queue-title h2, .queue-empty, .app-statusbar, .button.primary, .file-table th",
+    ), theme);
+  }
+});
+
+test("暗色背景保持中性，亮色文件区柔和且两套主题的层次清晰", async ({ page }) => {
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await page.goto("/");
+    const surfaces = await page.locator(".titlebar, .sidebar, .file-pane--local, .file-table th.column-name").evaluateAll((elements) =>
+      elements.map((element) => getComputedStyle(element).backgroundColor.match(/\d+/gu)!.slice(0, 3).map(Number)));
+    const [chrome, sidebar, canvas, header] = surfaces;
+    expect(chrome).not.toEqual(canvas);
+    expect(sidebar).not.toEqual(canvas);
+    expect(header).not.toEqual(canvas);
+    for (const channels of surfaces) {
+      expect(Math.max(...channels) - Math.min(...channels), `${theme}: 表面不应带有明显偏色`).toBeLessThanOrEqual(12);
+      if (theme === "dark") {
+        expect(Math.max(...channels)).toBeLessThan(64);
+        expect(Math.min(...channels)).toBeGreaterThan(15);
+      } else {
+        expect(Math.min(...channels)).toBeGreaterThan(220);
       }
-      const foreground = luminance(getComputedStyle(element).color);
-      const behind = luminance(background);
-      return {
-        label: element.textContent?.trim(),
-        ratio: (Math.max(foreground, behind) + 0.05) / (Math.min(foreground, behind) + 0.05),
-      };
-    }));
-    for (const { label, ratio } of contrasts) expect(ratio, `${theme}: ${label}`).toBeGreaterThanOrEqual(4.5);
+    }
+    if (theme === "light") expect(Math.max(...canvas), "文件区不使用纯白底").toBeLessThan(255);
   }
 });

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDownToLine, Copy, FolderPlus, Info, Pencil, RefreshCw, ScanEye, Trash2 } from "lucide-react";
+import { ArrowDownToLine, Copy, FolderPlus, Info, MoreHorizontal, Pencil, RefreshCw, ScanEye, Trash2 } from "lucide-react";
 import type { FileAction, FileEntry } from "../lib/types";
 import { isOrdinaryFile } from "../lib/files";
 import { IconButton } from "./IconButton";
@@ -32,14 +32,19 @@ function disabled(action: FileAction, { entries, ready, mutationsBlocked, downlo
   if (action === "delete") return !entries.length || entries.some((entry) => entry.isSymlink || entry.path === "/");
   return action !== "createDirectory" && (entries.length !== 1 || entries[0].isSymlink);
 }
-export function RemoteFileToolbar(options: ActionOptions) {
-  return <div className="file-action-toolbar remote-file-toolbar" role="toolbar" aria-label="远程文件操作">
+export function RemoteFileToolbar(options: ActionOptions & { menuOpen: boolean; onMenu: (trigger: HTMLButtonElement) => void }) {
+  return <div className="file-actions remote-file-toolbar">
     {actions.map(({ id, label, Icon }) => <IconButton key={id} label={label} disabled={disabled(id, options)}
+      className={["copyPath", "rename", "properties"].includes(id) ? "toolbar-secondary" : ""}
       onClick={() => options.onAction(id, options.entries)}><Icon size={16} /></IconButton>)}
+    <IconButton label="更多文件操作" className="file-toolbar-overflow" disabled={!options.ready}
+      aria-haspopup="menu" aria-expanded={options.menuOpen} onClick={(event) => options.onMenu(event.currentTarget)}>
+      <MoreHorizontal size={16} />
+    </IconButton>
   </div>;
 }
-export function RemoteFileMenu({ anchor, trigger, onClose, onRefresh, ...options }: ActionOptions & {
-  anchor: { x: number; y: number }; trigger: HTMLElement | null; onClose: () => void; onRefresh: () => void;
+export function RemoteFileMenu({ anchor, trigger, toggleTrigger = false, onClose, onRefresh, ...options }: ActionOptions & {
+  anchor: { x: number; y: number }; trigger: HTMLElement | null; toggleTrigger?: boolean; onClose: () => void; onRefresh: () => void;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ left: anchor.x, top: anchor.y });
@@ -52,7 +57,10 @@ export function RemoteFileMenu({ anchor, trigger, onClose, onRefresh, ...options
     panel.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
   }, [anchor.x, anchor.y]);
   useEffect(() => {
-    const outside = (event: Event) => { if (!panel.current?.contains(event.target as Node)) onClose(); };
+    const outside = (event: Event) => {
+      const togglesMenu = toggleTrigger && trigger?.contains(event.target as Node);
+      if (!panel.current?.contains(event.target as Node) && !togglesMenu) onClose();
+    };
     const move = () => onClose();
     document.addEventListener("pointerdown", outside);
     document.addEventListener("focusin", outside);
@@ -62,7 +70,7 @@ export function RemoteFileMenu({ anchor, trigger, onClose, onRefresh, ...options
       document.removeEventListener("pointerdown", outside); document.removeEventListener("focusin", outside);
       document.removeEventListener("scroll", move, true); window.removeEventListener("resize", move);
     };
-  }, [onClose]);
+  }, [onClose, trigger, toggleTrigger]);
   function close() { onClose(); if (trigger?.isConnected) trigger.focus(); }
   return createPortal(<div ref={panel} role="menu" aria-label="远程文件操作" className="remote-file-menu" style={position}
     onContextMenu={(event) => event.preventDefault()} onKeyDown={(event) => {

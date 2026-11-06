@@ -92,6 +92,47 @@ describe("工作区", () => {
     expect(fixture.profiles).toHaveLength(1);
     expect(fixture.profiles[0]).not.toHaveProperty("password");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(within(document.querySelector<HTMLElement>(".app-statusbar")!).getByRole("alert")).toHaveTextContent("连接配置已保存");
+  });
+
+  it("全局提示位于底部，可以查看完整内容、收起和关闭而不影响工作区", async () => {
+    const message = `读取环境失败：${"/a-very-long-directory".repeat(20)}，请检查目录权限。`;
+    fixture.getEnvironment.mockRejectedValue(new Error(message));
+    const user = userEvent.setup();
+    render(<App />);
+    const notice = await screen.findByRole("alert");
+    expect(document.querySelector(".app-statusbar")).toContainElement(notice);
+    const detailsButton = screen.getByRole("button", { name: "查看完整提示" });
+    await user.click(detailsButton);
+    expect(screen.getByRole("region", { name: "完整提示" })).toHaveTextContent(message);
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("region", { name: "完整提示" })).not.toBeInTheDocument();
+    expect(detailsButton).toHaveFocus();
+    expect(notice).toHaveTextContent(message);
+    await user.click(detailsButton);
+    await user.click(screen.getByRole("textbox", { name: "本地路径" }));
+    expect(screen.queryByRole("region", { name: "完整提示" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "关闭提示" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "本地文件" })).toBeVisible();
+  });
+
+  it("连接设置打开当前连接菜单，重复点击关闭并支持键盘返回触发器", async () => {
+    fixture.profiles = [{
+      id: "e6814610-8703-4c50-ab27-e823c8577fc3", name: "当前连接", host: "test.example.invalid",
+      port: 22, username: "tester", authMethod: "password", privateKeyPath: null, remotePath: ".",
+    }];
+    const user = userEvent.setup();
+    render(<App />);
+    const settings = await screen.findByRole("button", { name: "连接设置" });
+    await user.click(settings);
+    expect(screen.getByRole("menu", { name: "当前连接 连接操作" })).toBeVisible();
+    await user.keyboard("{Escape}");
+    expect(settings).toHaveFocus();
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    await user.click(settings);
+    await user.click(settings);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
   it("可以新建、改名和删除分组，删除后连接移回未分组", async () => {

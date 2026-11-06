@@ -17,7 +17,7 @@ export function applyTheme(preference: ThemePreference, systemDark: boolean) {
   const root = document.documentElement;
   root.dataset.theme = theme;
   root.style.colorScheme = theme;
-  const background = theme === "dark" ? "#191b20" : "#e9edf1";
+  const background = theme === "dark" ? "#191b1e" : "#eaedf0";
   root.style.backgroundColor = background;
   document.querySelector('meta[name="theme-color"]')?.setAttribute("content", background);
 }
