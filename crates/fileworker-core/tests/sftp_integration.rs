@@ -221,6 +221,17 @@ fn connected_manager(
     (remote, session.session_id)
 }
 
+fn connect_profile(manager: &ConnectionManager, profile: ConnectionProfile) -> (String, String) {
+    let attempt = id();
+    if !manager.probe(attempt.clone(), profile).unwrap().trusted {
+        manager.trust(&attempt).unwrap();
+    }
+    let session = manager
+        .authenticate(&attempt, secret("test-password-only"), false)
+        .unwrap();
+    (attempt, session.session_id)
+}
+
 fn transfer_request(
     session: &str,
     source: &str,
@@ -253,6 +264,487 @@ fn wait_for_job(queue: &TransferManager, job: &str, state: TransferState) {
         "expected {state:?}, snapshot: {:?}",
         queue.snapshot().unwrap()
     );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn multi_session_browsing_and_transfers_survive_another_profile_connecting_and_disconnecting() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let server_a = Server::start(first.path(), 0, "host");
+    let server_b = Server::start(second.path(), 0, "host");
+    let (remote, session_a) = connected_manager(first.path(), config.path(), &server_a);
+    fs::write(first.path().join("slow-transfers"), b"enabled").unwrap();
+    let data = vec![71; 2 * 1024 * 1024];
+    let upload_a = local.path().join("only-a.bin");
+    let upload_b = local.path().join("only-b.txt");
+    fs::write(&upload_a, &data).unwrap();
+    fs::write(&upload_b, b"second server").unwrap();
+    let queue = TransferManager::new(remote.clone());
+    let jobs_a = queue
+        .enqueue(vec![transfer_request(
+            &session_a,
+            upload_a.to_str().unwrap(),
+            "/",
+            true,
+        )])
+        .unwrap();
+    assert!(wait_until(
+        || queue.snapshot().unwrap().jobs[0].transferred_bytes > 0,
+        Duration::from_secs(5)
+    ));
+    let mut profile_b = server_b.profile();
+    profile_b.id = id();
+    let attempt_b = id();
+    remote.probe(attempt_b.clone(), profile_b).unwrap();
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    remote.trust(&attempt_b).unwrap();
+    let session_b = remote
+        .authenticate(&attempt_b, secret("test-password-only"), false)
+        .unwrap()
+        .session_id;
+    assert_ne!(session_a, session_b);
+    assert!(remote.is_session_active(&session_a));
+    assert_eq!(remote.list(&session_b, "/folder").unwrap().path, "/folder");
+    let jobs_b = queue
+        .enqueue(vec![transfer_request(
+            &session_b,
+            upload_b.to_str().unwrap(),
+            "/",
+            true,
+        )])
+        .unwrap();
+    wait_for_job(&queue, &jobs_b[0], TransferState::Completed);
+    remote.disconnect(&session_b).unwrap();
+    assert_eq!(
+        remote.list(&session_b, "/").unwrap_err().code,
+        "session_closed"
+    );
+    wait_for_job(&queue, &jobs_a[0], TransferState::Completed);
+    assert_eq!(
+        fs::read(first.path().join("files/only-a.bin")).unwrap(),
+        data
+    );
+    assert_eq!(
+        fs::read(second.path().join("files/only-b.txt")).unwrap(),
+        b"second server"
+    );
+    assert!(!first.path().join("files/only-b.txt").exists());
+    assert!(!second.path().join("files/only-a.bin").exists());
+    let download = queue
+        .enqueue(vec![transfer_request(
+            &session_a,
+            "/only-a.bin",
+            downloads.path().to_str().unwrap(),
+            false,
+        )])
+        .unwrap();
+    wait_for_job(&queue, &download[0], TransferState::Completed);
+    assert_eq!(fs::read(downloads.path().join("only-a.bin")).unwrap(), data);
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn multi_session_failed_canceled_and_superseded_attempts_preserve_authenticated_sessions() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session_a) = connected_manager(fixture.path(), config.path(), &server);
+    let mut profile_b = server.profile();
+    profile_b.id = id();
+    let failed = id();
+    remote.probe(failed.clone(), profile_b.clone()).unwrap();
+    assert_eq!(
+        remote
+            .authenticate(&failed, secret("wrong"), false)
+            .unwrap_err()
+            .code,
+        "authentication_failed"
+    );
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    remote.cancel(&failed).unwrap();
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    let pending = id();
+    remote.probe(pending.clone(), profile_b.clone()).unwrap();
+    remote.cancel(&pending).unwrap();
+    assert_eq!(remote.trust(&pending).unwrap_err().code, "attempt_expired");
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    let superseded = id();
+    remote.probe(superseded.clone(), profile_b.clone()).unwrap();
+    let replacement = id();
+    remote.probe(replacement.clone(), profile_b).unwrap();
+    remote.cancel(&superseded).unwrap();
+    assert_eq!(
+        remote.trust(&superseded).unwrap_err().code,
+        "attempt_expired"
+    );
+    let session_b = remote
+        .authenticate(&replacement, secret("test-password-only"), false)
+        .unwrap();
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    assert_eq!(remote.list(&session_b.session_id, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn multi_session_cancel_by_attempt_and_disconnect_by_session_are_targeted() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let remote = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+    );
+    let (attempt_a, session_a) = connect_profile(&remote, server.profile());
+    let mut profile_b = server.profile();
+    profile_b.id = id();
+    let (attempt_b, session_b) = connect_profile(&remote, profile_b.clone());
+    remote.cancel(&attempt_b).unwrap();
+    remote.cancel(&attempt_b).unwrap();
+    assert_eq!(
+        remote.list(&session_b, "/").unwrap_err().code,
+        "session_closed"
+    );
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    let (_, session_b) = connect_profile(&remote, profile_b);
+    remote.disconnect(&session_a).unwrap();
+    remote.disconnect(&session_a).unwrap();
+    remote.disconnect(&id()).unwrap();
+    remote.cancel(&attempt_a).unwrap();
+    assert_eq!(
+        remote.list(&session_a, "/").unwrap_err().code,
+        "session_closed"
+    );
+    assert_eq!(remote.list(&session_b, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn multi_session_profile_disconnect_preserves_other_active_and_pending_profiles() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session_a) = connected_manager(fixture.path(), config.path(), &server);
+    let mut profile_b = server.profile();
+    profile_b.id = id();
+    let (_, session_b) = connect_profile(&remote, profile_b.clone());
+    let mut profile_c = server.profile();
+    profile_c.id = id();
+    let attempt_c = id();
+    remote.probe(attempt_c.clone(), profile_c.clone()).unwrap();
+    remote.disconnect_profile(&profile_b.id).unwrap();
+    assert_eq!(
+        remote.list(&session_b, "/").unwrap_err().code,
+        "session_closed"
+    );
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    let session_c = remote
+        .authenticate(&attempt_c, secret("test-password-only"), false)
+        .unwrap();
+    let pending_b = id();
+    remote.probe(pending_b.clone(), profile_b.clone()).unwrap();
+    remote.disconnect_profile(&profile_b.id).unwrap();
+    remote.disconnect_profile(&profile_b.id).unwrap();
+    assert_eq!(
+        remote.trust(&pending_b).unwrap_err().code,
+        "attempt_expired"
+    );
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    assert_eq!(remote.list(&session_c.session_id, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn multi_session_same_profile_replaces_only_after_successful_authentication() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session_a) = connected_manager(fixture.path(), config.path(), &server);
+    let mut profile_b = server.profile();
+    profile_b.id = id();
+    let (_, session_b) = connect_profile(&remote, profile_b);
+    let replacement = id();
+    remote.probe(replacement.clone(), server.profile()).unwrap();
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    assert_eq!(
+        remote
+            .authenticate(&replacement, secret("wrong"), false)
+            .unwrap_err()
+            .code,
+        "authentication_failed"
+    );
+    assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    let new = remote
+        .authenticate(&replacement, secret("test-password-only"), false)
+        .unwrap();
+    assert_ne!(new.session_id, session_a);
+    assert_eq!(
+        remote.list(&session_a, "/").unwrap_err().code,
+        "session_closed"
+    );
+    assert_eq!(remote.list(&new.session_id, "/").unwrap().path, "/");
+    assert_eq!(remote.list(&session_b, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn multi_session_profile_invalidation_does_not_close_other_profiles() {
+    let fixture = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    for deleting in [true, false] {
+        let config = tempfile::tempdir().unwrap();
+        let remote = Arc::new(ConnectionManager::new(
+            config.path().into(),
+            fixture.path().into(),
+            Arc::new(MemoryCredentials::default()),
+        ));
+        let service = ProfileService::new(ProfileStore::new(config.path().into()), remote.clone());
+        let profile_a = service.save(server.profile()).unwrap();
+        let mut profile_b = server.profile();
+        profile_b.id = id();
+        profile_b = service.save(profile_b).unwrap();
+        let (_, session_a) = connect_profile(&remote, profile_a);
+        let (_, session_b) = connect_profile(&remote, profile_b.clone());
+        if deleting {
+            service.delete(&profile_b.id).unwrap();
+        } else {
+            profile_b.username = "changed-account".into();
+            service.save(profile_b).unwrap();
+        }
+        assert_eq!(
+            remote.list(&session_b, "/").unwrap_err().code,
+            "session_closed"
+        );
+        assert_eq!(remote.list(&session_a, "/").unwrap().path, "/");
+    }
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn multi_session_shutdown_drains_transfers_then_closes_all_active_and_pending_connections() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session_a) = connected_manager(fixture.path(), config.path(), &server);
+    let mut profile_b = server.profile();
+    profile_b.id = id();
+    let (_, session_b) = connect_profile(&remote, profile_b);
+    let queue = TransferManager::new(remote.clone());
+    queue.set_concurrency(1).unwrap();
+    fs::write(fixture.path().join("slow-transfers"), b"enabled").unwrap();
+    let source = local.path().join("shutdown.bin");
+    fs::write(&source, vec![19; 2 * 1024 * 1024]).unwrap();
+    let jobs = queue
+        .enqueue(vec![
+            transfer_request(&session_a, source.to_str().unwrap(), "/", true),
+            transfer_request(&session_b, source.to_str().unwrap(), "/", true),
+        ])
+        .unwrap();
+    assert!(wait_until(
+        || queue.snapshot().unwrap().jobs[0].transferred_bytes > 0,
+        Duration::from_secs(5)
+    ));
+    let mut profile_c = server.profile();
+    profile_c.id = id();
+    let pending = id();
+    remote.probe(pending.clone(), profile_c).unwrap();
+    queue.shutdown();
+    remote.shutdown();
+    remote.shutdown();
+    for job in jobs {
+        wait_for_job(&queue, &job, TransferState::Canceled);
+    }
+    for session in [&session_a, &session_b] {
+        assert!(!remote.is_session_active(session));
+        assert_eq!(
+            remote.list(session, "/").unwrap_err().code,
+            "session_closed"
+        );
+    }
+    assert_eq!(remote.trust(&pending).unwrap_err().code, "attempt_expired");
+    assert_eq!(
+        remote
+            .authenticate(&pending, secret("test-password-only"), false)
+            .unwrap_err()
+            .code,
+        "attempt_expired"
+    );
+    assert_eq!(
+        remote.probe(id(), server.profile()).unwrap_err().code,
+        "session_closed"
+    );
+    assert!(!fixture.path().join("files/shutdown.bin").exists());
+    assert!(
+        !fs::read_dir(fixture.path().join("files"))
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".fileworker-"))
+    );
+    assert!(wait_until(
+        || {
+            fs::read_to_string(fixture.path().join("disconnect-events"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+                == fs::read_to_string(fixture.path().join("connections"))
+                    .unwrap()
+                    .lines()
+                    .count()
+        },
+        Duration::from_secs(2)
+    ));
+}
+
+#[test]
+fn multi_session_shutdown_interrupts_a_pending_handshake_and_rejects_new_probes() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let profile = ConnectionProfile {
+        id: id(),
+        name: "shutdown handshake".into(),
+        host: "127.0.0.1".into(),
+        port: listener.local_addr().unwrap().port(),
+        username: "tester".into(),
+        auth_method: AuthMethod::Password,
+        private_key_path: None,
+        remote_path: ".".into(),
+        group_id: None,
+    };
+    let manager = Arc::new(ConnectionManager::with_timeouts(
+        config.path().into(),
+        config.path().into(),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_secs(3),
+        Duration::from_secs(120),
+    ));
+    let (accepted, received) = mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .unwrap();
+        accepted.send(()).unwrap();
+        let mut buffer = [0; 256];
+        loop {
+            match socket.read(&mut buffer) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    });
+    let probe = {
+        let manager = manager.clone();
+        let profile = profile.clone();
+        std::thread::spawn(move || manager.probe(id(), profile))
+    };
+    received.recv_timeout(Duration::from_secs(2)).unwrap();
+    let started = Instant::now();
+    manager.shutdown();
+    let elapsed = started.elapsed();
+    let result = probe.join().unwrap();
+    assert!(
+        peer.join().unwrap(),
+        "shutdown must close the registered socket"
+    );
+    assert!(elapsed < Duration::from_millis(600));
+    assert_eq!(result.unwrap_err().code, "attempt_expired");
+    assert_eq!(
+        manager.probe(id(), profile).unwrap_err().code,
+        "session_closed"
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn multi_session_shutdown_during_credential_save_cancels_without_waiting_and_rolls_back() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (credentials, started, release) = BlockingCredentials::new(false);
+    let manager = Arc::new(ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        credentials.clone(),
+    ));
+    let (_, session) = connect_profile(&manager, server.profile());
+    let mut profile = server.profile();
+    profile.id = id();
+    let account = credential_account(&profile);
+    credentials
+        .memory
+        .set(&account, "previous-saved-value")
+        .unwrap();
+    let attempt = id();
+    manager.probe(attempt.clone(), profile).unwrap();
+    let auth = {
+        let manager = manager.clone();
+        std::thread::spawn(move || {
+            manager.authenticate(&attempt, secret("test-password-only"), true)
+        })
+    };
+    started.recv_timeout(Duration::from_secs(2)).unwrap();
+    let start = Instant::now();
+    manager.shutdown();
+    let elapsed = start.elapsed();
+    release.send(()).unwrap();
+    let result = auth.join().unwrap();
+    assert!(
+        elapsed < Duration::from_millis(600),
+        "shutdown must not wait on the vault"
+    );
+    assert_eq!(result.unwrap_err().code, "attempt_expired");
+    assert_eq!(
+        manager.list(&session, "/").unwrap_err().code,
+        "session_closed"
+    );
+    assert_eq!(
+        credentials.memory.get(&account).unwrap().as_str(),
+        "previous-saved-value"
+    );
+    assert_eq!(
+        manager.probe(id(), server.profile()).unwrap_err().code,
+        "session_closed"
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn multi_session_drop_closes_every_active_and_pending_socket() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+    );
+    let (_, session_a) = connect_profile(&manager, server.profile());
+    let mut profile_b = server.profile();
+    profile_b.id = id();
+    let (_, session_b) = connect_profile(&manager, profile_b);
+    let mut profile_c = server.profile();
+    profile_c.id = id();
+    manager.probe(id(), profile_c).unwrap();
+    assert_eq!(manager.list(&session_a, "/").unwrap().path, "/");
+    assert_eq!(manager.list(&session_b, "/").unwrap().path, "/");
+    drop(manager);
+    assert!(wait_until(
+        || {
+            fs::read_to_string(fixture.path().join("disconnect-events"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+                == 3
+        },
+        Duration::from_secs(2)
+    ));
 }
 
 #[test]

@@ -64,7 +64,7 @@ pub struct ConnectionManager {
 struct Inner {
     stopped: bool,
     pending: Option<Pending>,
-    active: Option<Active>,
+    active: HashMap<String, Active>,
     canceled_attempts: HashSet<String>,
 }
 
@@ -88,7 +88,6 @@ struct Handle {
 }
 
 struct Active {
-    id: String,
     attempt_id: String,
     handle: Handle,
     profile: ConnectionProfile,
@@ -159,14 +158,14 @@ impl ConnectionManager {
         let canceled = Arc::new(AtomicBool::new(false));
         {
             let mut inner = self.lock()?;
+            if inner.stopped {
+                return Err(closed());
+            }
             if inner.canceled_attempts.contains(&attempt_id) {
                 return Err(expired());
             }
             if let Some(old) = inner.pending.take() {
                 close_pending(old);
-            }
-            if let Some(old) = inner.active.take() {
-                old.handle.close();
             }
             inner.pending = Some(Pending {
                 id: attempt_id.clone(),
@@ -366,13 +365,23 @@ impl ConnectionManager {
                 let session_id = Uuid::new_v4().to_string();
                 inner.pending.take();
                 self.expiration.notify_one();
-                inner.active = Some(Active {
-                    id: session_id.clone(),
-                    attempt_id: attempt_id.into(),
-                    handle: handle.clone(),
-                    profile: profile.clone(),
-                    secret: Arc::new(secret),
+                inner.active.retain(|_, active| {
+                    if active.profile.id == profile.id {
+                        active.handle.close();
+                        false
+                    } else {
+                        true
+                    }
                 });
+                inner.active.insert(
+                    session_id.clone(),
+                    Active {
+                        attempt_id: attempt_id.into(),
+                        handle: handle.clone(),
+                        profile: profile.clone(),
+                        secret: Arc::new(secret),
+                    },
+                );
                 Ok(ConnectedSession {
                     session_id,
                     profile_id: profile.id,
@@ -453,8 +462,7 @@ impl ConnectionManager {
         let handle = self
             .lock()?
             .active
-            .as_ref()
-            .filter(|active| active.id == session_id)
+            .get(session_id)
             .map(|active| active.handle.clone())
             .ok_or_else(closed)?;
         let result = {
@@ -478,9 +486,10 @@ impl ConnectionManager {
 
     pub fn is_session_active(&self, session_id: &str) -> bool {
         self.lock().is_ok_and(|inner| {
-            inner.active.as_ref().is_some_and(|active| {
-                active.id == session_id && !active.handle.canceled.load(Ordering::SeqCst)
-            })
+            inner
+                .active
+                .get(session_id)
+                .is_some_and(|active| !active.handle.canceled.load(Ordering::SeqCst))
         })
     }
 
@@ -491,11 +500,7 @@ impl ConnectionManager {
     ) -> Result<(SftpConnection, Arc<AtomicBool>), CoreError> {
         let (profile, secret, identity, session_canceled) = {
             let inner = self.lock()?;
-            let active = inner
-                .active
-                .as_ref()
-                .filter(|active| active.id == session_id)
-                .ok_or_else(closed)?;
+            let active = inner.active.get(session_id).ok_or_else(closed)?;
             (
                 active.profile.clone(),
                 active.secret.clone(),
@@ -542,25 +547,20 @@ impl ConnectionManager {
             close_pending(pending);
             self.expiration.notify_one();
         }
-        if inner
-            .active
-            .as_ref()
-            .is_some_and(|active| active.attempt_id == attempt_id)
-            && let Some(active) = inner.active.take()
-        {
-            active.handle.close();
-        }
+        inner.active.retain(|_, active| {
+            if active.attempt_id == attempt_id {
+                active.handle.close();
+                false
+            } else {
+                true
+            }
+        });
         Ok(())
     }
 
     pub fn disconnect(&self, session_id: &str) -> Result<(), CoreError> {
         let mut inner = self.lock()?;
-        if inner
-            .active
-            .as_ref()
-            .is_some_and(|active| active.id == session_id)
-            && let Some(active) = inner.active.take()
-        {
+        if let Some(active) = inner.active.remove(session_id) {
             active.handle.close();
         }
         Ok(())
@@ -577,15 +577,27 @@ impl ConnectionManager {
             close_pending(pending);
             self.expiration.notify_one();
         }
-        if inner
-            .active
-            .as_ref()
-            .is_some_and(|active| active.profile.id == profile_id)
-            && let Some(active) = inner.active.take()
-        {
+        inner.active.retain(|_, active| {
+            if active.profile.id == profile_id {
+                active.handle.close();
+                false
+            } else {
+                true
+            }
+        });
+        Ok(())
+    }
+
+    pub fn shutdown(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner.stopped = true;
+        if let Some(pending) = inner.pending.take() {
+            close_pending(pending);
+        }
+        for (_, active) in inner.active.drain() {
             active.handle.close();
         }
-        Ok(())
+        self.expiration.notify_one();
     }
 
     pub fn credential_storage_supported(&self) -> bool {
@@ -722,16 +734,7 @@ fn close_pending(pending: Pending) {
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.stopped = true;
-            if let Some(pending) = inner.pending.take() {
-                close_pending(pending);
-            }
-            if let Some(active) = inner.active.take() {
-                active.handle.close();
-            }
-        }
-        self.expiration.notify_one();
+        self.shutdown();
         if let Some(worker) = self.expiry_worker.take() {
             let _ = worker.join();
         }

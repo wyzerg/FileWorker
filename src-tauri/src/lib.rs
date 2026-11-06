@@ -78,6 +78,8 @@ pub fn run() {
                 && let Some(state) = app.try_state::<AppState>()
             {
                 state.transfers.shutdown();
+                state.remote.shutdown();
+                state.connection_tests.shutdown();
             }
         });
 }
