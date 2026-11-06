@@ -20,8 +20,8 @@ macOS Apple Silicon 实验性预发布；
 支持只读文件预览和受限的远程文件修改，详见[远程工作区验收](docs/acceptance/2026-11-05-remote-workspace.md)。
 `v0.1.0-preview.6` 补齐双栏工具栏对齐与远程多选批量删除，包含确认清单、逐项结果及仅重试失败项，
 详见[preview.6 发布说明](docs/releases/v0.1.0-preview.6.md)。
-`v0.1.0-preview.7` 已完成紧凑单行工具栏、底部通知与明暗配色的本地构建和归档校验，
-公开附件尚待上传及回读，详见[preview.7 发布说明](docs/releases/v0.1.0-preview.7.md)。
+`v0.1.0-preview.7` 已发布紧凑单行工具栏、底部通知与明暗配色，
+公开附件回读、校验与解压签名检查通过，详见[preview.7 发布说明](docs/releases/v0.1.0-preview.7.md)。
 Windows、Linux 桌面和 Intel Mac 尚未验收。
 开发版 `.app` 未进行 Developer ID 签名与公证，不应当作正式发行版分发。
 
@@ -32,7 +32,7 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 
 ## macOS 预发布安装
 
-当前推荐 `v0.1.0-preview.6` 的 macOS Apple Silicon `.app.zip`，以及同名
+当前推荐 `v0.1.0-preview.7` 的 macOS Apple Silicon `.app.zip`，以及同名
 `.sha256` 文件。旧 `preview.1`、`preview.2` 缺少完整应用资源签名，浏览器下载后
 可能显示“已损坏”；保留历史产物，但不再推荐安装。
 
@@ -42,7 +42,7 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 1. 从本仓库 GitHub Releases 下载 ZIP 与校验文件，在下载目录执行：
 
    ```bash
-   shasum -a 256 -c FileWorker-v0.1.0-preview.6-macos-arm64.app.zip.sha256
+   shasum -a 256 -c FileWorker-v0.1.0-preview.7-macos-arm64.app.zip.sha256
    ```
 
 2. 校验成功后解压，将新包中的 `FileWorker.app` 放到应用程序目录。
@@ -58,9 +58,10 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 [签名修复验收记录](docs/acceptance/2026-11-05-macos-preview-signing.md)。
 `preview.5` 已校验归档和解压签名，并使用同一 ZIP 解压的应用完成原生工作区验收；
 尚未补做该版本的浏览器下载和 Gatekeeper 首次启动验收。
-`preview.6` 已无认证回读公开 ZIP 与校验文件，内容与本地产物逐字节一致；
-下载包的 SHA-256、ZIP 完整性与解压后的严格签名检查通过，批量删除通过行为及浏览器界面回归；
-本次没有重做真实原生批量删除、浏览器下载后的首次启动或安装升级验收。
+`preview.7` 已无认证回读公开 ZIP 与校验文件，内容与本地产物逐字节一致；
+下载包的 SHA-256、ZIP 完整性与解压后的严格签名、标识、版本和架构检查通过，
+紧凑工具栏、通知及明暗主题通过行为与浏览器回归。
+程序下载和解压不代替浏览器首次启动、Finder 或安装升级验收，本轮没有重做这些原生验收。
 
 ## 平台边界
 
@@ -456,12 +457,13 @@ cargo test -p fileworker-app keychain_roundtrip_and_delete_use_an_isolated_rando
 macOS，创建一个随机测试条目并在结束时清理。C AddressSanitizer 需实际对 C 依赖加
 `-fsanitize=address`，仅运行普通 Rust 测试不能替代；本轮编译与运行方式记录在第二阶段计划中。
 
-2026-11-06 `v0.1.0-preview.7` 发布准备重新通过 `217` 项前端、`35` 项 Playwright、
+2026-11-06 `v0.1.0-preview.7` 发布重新通过 `217` 项前端、`35` 项 Playwright、
 `68` 项默认 Rust、`11` 项打包回归、类型、格式、Clippy 和锁定依赖的
 macOS arm64 优化 `.app` 构建；ZIP、SHA-256 与解压后的严格签名校验通过。
 本轮使用隔离的浏览器 IPC 夹具，不访问用户服务器或钥匙串；没有重跑真实协议、
 原生界面、Finder 拖入、Gatekeeper 首次启动或安装升级验收。
-没有替换已安装的应用或旧版附件。`preview.7` 公开附件仍待上传和回读核验；
+没有替换已安装的应用或旧版附件。`preview.7` 已公开为实验性预发布，两项附件经无认证回读，
+与本地产物逐字节一致；公开 ZIP 的校验值、完整性及解压后的严格签名检查通过。
 产物与验证边界见[新版发布说明](docs/releases/v0.1.0-preview.7.md)。
 
 `v0.1.0-preview.6` 在 2026-11-05 重新完成的验证：
