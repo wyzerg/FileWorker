@@ -162,3 +162,159 @@ it("canceling during a saved-credential status check cannot start authentication
   expect(remote.auth).not.toHaveBeenCalled();
   expect(hook.result.current.attempt).toBeNull();
 });
+
+const otherProfile = { ...profile, id: "f148fd16-f1a2-442b-a3a6-01a8ee91462f", name: "另一个连接" };
+function multipleSessions() {
+  const attempts = new Map<string, string>();
+  remote.probe.mockImplementation(async (profileId, attemptId) => {
+    attempts.set(attemptId, profileId);
+    return {
+      attemptId, trusted: true, host: profile.host, port: 22,
+      identity: { algorithm: "ssh-ed25519", fingerprint: "SHA256:generated" },
+    };
+  });
+  remote.auth.mockImplementation(async (attemptId) => ({
+    sessionId: `session-${attempts.get(attemptId)}`, profileId: attempts.get(attemptId),
+    initialPath: "/home/tester", warning: null,
+  }));
+}
+
+it("switching back restores a live session, path input and history without reconnecting", async () => {
+  multipleSessions();
+  const hook = renderHook(({ selected }) => useRemoteConnection(selected, () => {}), {
+    initialProps: { selected: profile },
+  });
+  await act(async () => { await hook.result.current.connect(input); });
+  const firstSession = hook.result.current.session!.sessionId;
+  await act(async () => { await hook.result.current.navigate("/srv/one"); });
+  await act(async () => { await hook.result.current.navigate("/srv/two"); });
+  act(() => hook.result.current.setPath("/not-submitted"));
+  hook.rerender({ selected: otherProfile });
+  await act(async () => { await hook.result.current.connect(input); });
+  expect(hook.result.current.session?.profileId).toBe(otherProfile.id);
+  hook.rerender({ selected: profile });
+  expect(hook.result.current.session?.sessionId).toBe(firstSession);
+  expect(hook.result.current.path).toBe("/not-submitted");
+  expect(hook.result.current.listing?.path).toBe("/srv/two");
+  await act(async () => { await hook.result.current.goBack(); });
+  expect(hook.result.current.listing?.path).toBe("/srv/one");
+  expect(hook.result.current.canGoForward).toBe(true);
+  expect(remote.disconnect).not.toHaveBeenCalled();
+  expect(remote.auth).toHaveBeenCalledTimes(2);
+});
+
+it("late directory results update the original background workspace, never the selected server", async () => {
+  multipleSessions();
+  const hook = renderHook(({ selected }) => useRemoteConnection(selected, () => {}), {
+    initialProps: { selected: profile },
+  });
+  await act(async () => { await hook.result.current.connect(input); });
+  let finish!: (value: unknown) => void;
+  remote.list.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  act(() => { void hook.result.current.navigate("/background-result"); });
+  hook.rerender({ selected: otherProfile });
+  await act(async () => { await hook.result.current.connect(input); });
+  await act(async () => { finish({ path: "/background-result", parentPath: "/", entries: [], warnings: [] }); });
+  expect(hook.result.current.listing?.path).toBe("/home/tester");
+  hook.rerender({ selected: profile });
+  expect(hook.result.current.listing?.path).toBe("/background-result");
+  expect(hook.result.current.loading).toBe(false);
+});
+
+it("disconnecting one profile preserves the other and unmount closes the remaining sessions", async () => {
+  multipleSessions();
+  const hook = renderHook(({ selected }) => useRemoteConnection(selected, () => {}), {
+    initialProps: { selected: profile },
+  });
+  await act(async () => { await hook.result.current.connect(input); });
+  const firstSession = hook.result.current.session!.sessionId;
+  hook.rerender({ selected: otherProfile });
+  await act(async () => { await hook.result.current.connect(input); });
+  const otherSession = hook.result.current.session!.sessionId;
+  act(() => hook.result.current.cancel());
+  expect(remote.disconnect).toHaveBeenCalledExactlyOnceWith(otherSession);
+  hook.rerender({ selected: profile });
+  expect(hook.result.current.session?.sessionId).toBe(firstSession);
+  hook.unmount();
+  expect(remote.disconnect).toHaveBeenCalledWith(firstSession);
+  expect(remote.disconnect).toHaveBeenCalledTimes(2);
+});
+
+it("a background network failure closes only its own session", async () => {
+  multipleSessions();
+  const hook = renderHook(({ selected }) => useRemoteConnection(selected, () => {}), {
+    initialProps: { selected: profile },
+  });
+  await act(async () => { await hook.result.current.connect(input); });
+  let fail!: (cause: unknown) => void;
+  remote.list.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+  act(() => { void hook.result.current.navigate("/lost"); });
+  hook.rerender({ selected: otherProfile });
+  await act(async () => { await hook.result.current.connect(input); });
+  const liveSession = hook.result.current.session!.sessionId;
+  await act(async () => { fail({ code: "connection_lost", message: "原连接网络中断" }); });
+  expect(hook.result.current.session?.sessionId).toBe(liveSession);
+  expect(hook.result.current.error).toBe("");
+  expect(remote.disconnect).toHaveBeenCalledExactlyOnceWith(`session-${profile.id}`);
+  hook.rerender({ selected: profile });
+  expect(hook.result.current.session).toBeNull();
+  expect(hook.result.current.error).toBe("原连接网络中断");
+});
+
+it.each(["identity change", "deletion"])("reconciling a background %s closes that profile only", async (change) => {
+  multipleSessions();
+  const hook = renderHook(({ selected, all }) => useRemoteConnection(selected, () => {}, all), {
+    initialProps: { selected: profile, all: [profile, otherProfile] },
+  });
+  await act(async () => { await hook.result.current.connect(input); });
+  hook.rerender({ selected: otherProfile, all: [profile, otherProfile] });
+  await act(async () => { await hook.result.current.connect(input); });
+  const liveSession = hook.result.current.session!.sessionId;
+  const updated = { ...profile, host: "new-endpoint.invalid" };
+  hook.rerender({ selected: otherProfile, all: change === "deletion" ? [otherProfile] : [updated, otherProfile] });
+  expect(hook.result.current.session?.sessionId).toBe(liveSession);
+  expect(hook.result.current.sessions.map((session) => session.sessionId)).toEqual([liveSession]);
+  expect(remote.disconnect).toHaveBeenCalledExactlyOnceWith(`session-${profile.id}`);
+});
+
+it("a canceled late authentication cannot overwrite another live connection", async () => {
+  multipleSessions();
+  const hook = renderHook(({ selected }) => useRemoteConnection(selected, () => {}), {
+    initialProps: { selected: profile },
+  });
+  await act(async () => { await hook.result.current.connect(input); });
+  hook.rerender({ selected: otherProfile });
+  let finish!: (value: unknown) => void;
+  remote.auth.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  act(() => { void hook.result.current.connect(input); });
+  await waitFor(() => expect(remote.auth).toHaveBeenCalledTimes(2));
+  hook.rerender({ selected: profile });
+  await act(async () => {
+    finish({ sessionId: "late-background", profileId: otherProfile.id, initialPath: "/", warning: null });
+  });
+  expect(hook.result.current.session?.sessionId).toBe(`session-${profile.id}`);
+  expect(remote.disconnect).toHaveBeenCalledExactlyOnceWith("late-background");
+  hook.rerender({ selected: otherProfile });
+  expect(hook.result.current.session).toBeNull();
+  expect(hook.result.current.attempt).toBeNull();
+});
+
+it("a slow initial directory for an authenticated background session cannot block the next authentication", async () => {
+  multipleSessions();
+  let finish!: (value: unknown) => void;
+  remote.list.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  const hook = renderHook(({ selected }) => useRemoteConnection(selected, () => {}), {
+    initialProps: { selected: profile },
+  });
+  act(() => { void hook.result.current.connect(input); });
+  await waitFor(() => expect(hook.result.current.session?.profileId).toBe(profile.id));
+  expect(hook.result.current.loading).toBe(true);
+  hook.rerender({ selected: otherProfile });
+  await act(async () => { await hook.result.current.connect(input); });
+  expect(hook.result.current.session?.profileId).toBe(otherProfile.id);
+  expect(hook.result.current.working).toBe(false);
+  await act(async () => { finish({ path: "/slow-home", parentPath: "/", entries: [], warnings: [] }); });
+  expect(hook.result.current.listing?.path).toBe("/home/tester");
+  hook.rerender({ selected: profile });
+  expect(hook.result.current.listing?.path).toBe("/slow-home");
+});
