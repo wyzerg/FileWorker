@@ -24,9 +24,8 @@ macOS Apple Silicon 实验性预发布；
 公开附件回读、校验与解压签名检查通过，详见[preview.7 发布说明](docs/releases/v0.1.0-preview.7.md)。
 `v0.1.0-preview.8` 已发布多连接同时保持：切换不再断开已连接服务器，后台传输继续。
 公开包校验及解压签名检查通过，详见[preview.8 发布说明](docs/releases/v0.1.0-preview.8.md)。
-当前源码已改为应用自己的本地加密凭据库，不再访问 macOS 钥匙串。
-该改动尚未包含在 `preview.8`；升级后需手动输入一次，再勾选记住。
-`preview.9` 已完成本地构建与打包，公开发布尚待确认，
+`v0.1.0-preview.9` 已发布应用自己的本地加密凭据库，不再访问 macOS 钥匙串。
+升级后需手动输入一次，再勾选记住。公开附件回读、校验与解压签名检查通过，
 详见[preview.9 发布说明](docs/releases/v0.1.0-preview.9.md)。
 Windows、Linux 桌面和 Intel Mac 尚未验收。
 开发版 `.app` 未进行 Developer ID 签名与公证，不应当作正式发行版分发。
@@ -38,7 +37,7 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 
 ## macOS 预发布安装
 
-当前推荐 `v0.1.0-preview.8` 的 macOS Apple Silicon `.app.zip`，以及同名
+当前推荐 `v0.1.0-preview.9` 的 macOS Apple Silicon `.app.zip`，以及同名
 `.sha256` 文件。旧 `preview.1`、`preview.2` 缺少完整应用资源签名，浏览器下载后
 可能显示“已损坏”；保留历史产物，但不再推荐安装。
 
@@ -48,7 +47,7 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 1. 从本仓库 GitHub Releases 下载 ZIP 与校验文件，在下载目录执行：
 
    ```bash
-   shasum -a 256 -c FileWorker-v0.1.0-preview.8-macos-arm64.app.zip.sha256
+   shasum -a 256 -c FileWorker-v0.1.0-preview.9-macos-arm64.app.zip.sha256
    ```
 
 2. 校验成功后解压，将新包中的 `FileWorker.app` 放到应用程序目录。
@@ -64,9 +63,10 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 [签名修复验收记录](docs/acceptance/2026-11-05-macos-preview-signing.md)。
 `preview.5` 已校验归档和解压签名，并使用同一 ZIP 解压的应用完成原生工作区验收；
 尚未补做该版本的浏览器下载和 Gatekeeper 首次启动验收。
-`preview.8` 已无认证回读公开 ZIP 与校验文件，内容与本地产物逐字节一致；
+`preview.9` 已无认证回读公开 ZIP 与校验文件，内容与本地产物逐字节一致；
 下载包的 SHA-256、ZIP 完整性与解压后的严格签名、标识、版本和架构检查通过，
-多连接、后台传输、紧凑工具栏、通知及明暗主题通过行为与浏览器回归。
+本地凭据保存/重启复用通过隔离协议验证，多连接、后台传输、紧凑工具栏、
+通知及明暗主题通过行为与浏览器回归。旧 Keychain 条目不读取、迁移或删除。
 程序下载和解压不代替浏览器首次启动、Finder 或安装升级验收，本轮没有重做这些原生验收。
 
 ## 平台边界
@@ -473,7 +473,7 @@ macOS Apple Silicon 免费预发布构建与打包：
 ```bash
 bash scripts/run.sh tauri build --bundles app --ci -- --locked
 bash scripts/run.sh test:preview
-bash scripts/run.sh preview:package v0.1.0-preview.8
+bash scripts/run.sh preview:package v0.1.0-preview.9
 ```
 
 `bundle.macOS.signingIdentity` 为 `"-"`，由 Tauri 对可执行文件和完整 `.app`
@@ -507,7 +507,10 @@ C AddressSanitizer 需实际对 C 依赖加
 `3` 项 Tauri 文件入口测试、`11` 项打包回归，以及类型、格式、工作区 Clippy 和锁定依赖优化构建。
 初始化中断、提交后报错再取消和临时夹具清理均先复现失败，再修复回归。
 全部协议测试在专用临时目录运行，结束后检查为空；不访问真实应用凭据、钥匙串或用户服务器。
-本地 `preview.9` ZIP 和解压签名检查通过，公开发布状态在后续核验后更新。
+`preview.9` 标签指向 `7aaffac`，Release `438685929` 的两项附件已先上传草稿、
+核对服务端摘要，再公开为实验性预发布。无认证回读与本地产物逐字节一致，
+ZIP、SHA-256、解压签名、标识、版本和架构校验通过，`preview.8` 的附件保持不变。
+本轮虚拟环境、截图报告、临时下载及解压副本已清理，保留正式发布包和编译缓存。
 未重跑 ASan、原生 GUI/Finder、首次启动、Gatekeeper、安装升级或其他平台验收。
 
 2026-11-06 `v0.1.0-preview.8` 多连接改进重新通过 `239` 项前端（默认及随机顺序 seed `72611`）、

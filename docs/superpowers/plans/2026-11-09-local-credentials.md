@@ -75,5 +75,5 @@ documentation only if a verified new binary is published.
   leakage; fix concrete findings with regressions.
 - [x] Run full Rust/protocol, frontend (default/shuffle), Playwright, types,
   format, Clippy, optimized build and packaging checks.
-- [ ] Clean task-owned fixtures/reports, inspect final diff, then commit/push
+- [x] Clean task-owned fixtures/reports, inspect final diff, then commit/push
   under the user's standing request. Do not mislabel preview.8 as containing it.
