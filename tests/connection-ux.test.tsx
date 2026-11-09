@@ -29,6 +29,11 @@ const profile: ConnectionProfile = {
   authMethod: "password", privateKeyPath: null, remotePath: ".",
 };
 const attempt: ConnectionAttempt = { id: "test-attempt", profile, phase: "auth" };
+const credentialMethods = [
+  ["password", "连接成功后记住密码"],
+  ["privateKey", "连接成功后记住私钥口令"],
+  ["privateKeyContent", "连接成功后记住私钥和口令"],
+] as const;
 
 beforeEach(() => {
   fixture.status.mockReset().mockResolvedValue({ available: false, supported: true });
@@ -108,26 +113,45 @@ it("取消测试后迟到的探测不再进入认证，草稿和密码保持", a
   expect(fixture.cancel).toHaveBeenCalledTimes(1);
 });
 
-it("手动输入与已保存密码来回切换不会清空本次输入", async () => {
+it.each(credentialMethods)("%s 手动输入与本机已存凭据来回切换不会清空本次输入", async (authMethod) => {
   fixture.status.mockResolvedValue({ available: true, supported: true });
   const user = userEvent.setup();
-  render(<ConnectionDialog attempt={attempt} working={false} error=""
-    onCancel={() => {}} onTrust={async () => {}} onAuthenticate={async () => {}} />);
-  await user.click(await screen.findByRole("button", { name: "更换密码" }));
-  await user.type(screen.getByLabelText("密码"), "replacement-password");
-  await user.click(screen.getByRole("button", { name: "使用已保存的密码" }));
-  await user.click(screen.getByRole("button", { name: "更换密码" }));
-  expect(screen.getByLabelText("密码")).toHaveValue("replacement-password");
+  const submit = vi.fn().mockResolvedValue(undefined);
+  const privateKey = authMethod !== "password";
+  const authProfile = { ...profile, authMethod, privateKeyPath: authMethod === "privateKey" ? "/isolated/id_ed25519" : null };
+  render(<ConnectionDialog attempt={{ ...attempt, profile: authProfile }} working={false} error=""
+    onCancel={() => {}} onTrust={async () => {}} onAuthenticate={submit} />);
+  const saved = await screen.findByText(privateKey ? "已保存私钥凭据" : "已保存密码");
+  expect(saved).toHaveAccessibleDescription(/本机.*加密保存.*下次连接.*自动使用/);
+  await user.click(screen.getByRole("button", { name: "连接" }));
+  expect(submit).toHaveBeenLastCalledWith(null, false, null);
+  await user.click(screen.getByRole("button", { name: privateKey ? "更换凭据" : "更换密码" }));
+  await user.type(screen.getByLabelText(privateKey ? "私钥口令" : "密码"), "replacement-secret");
+  if (authMethod === "privateKeyContent") {
+    await user.type(screen.getByLabelText("私钥内容"), "replacement-private-key");
+  }
+  await user.click(screen.getByRole("button", { name: privateKey ? "使用已保存的私钥凭据" : "使用已保存的密码" }));
+  await user.click(screen.getByRole("button", { name: "连接" }));
+  expect(submit).toHaveBeenCalledTimes(2);
+  expect(submit).toHaveBeenLastCalledWith(null, false, null);
+  await user.click(screen.getByRole("button", { name: privateKey ? "更换凭据" : "更换密码" }));
+  expect(screen.getByLabelText(privateKey ? "私钥口令" : "密码")).toHaveValue("replacement-secret");
+  if (authMethod === "privateKeyContent") {
+    expect(screen.getByLabelText("私钥内容")).toHaveValue("replacement-private-key");
+  }
+  await user.click(screen.getByRole("button", { name: "连接" }));
+  expect(submit).toHaveBeenLastCalledWith("replacement-secret", false,
+    authMethod === "privateKeyContent" ? "replacement-private-key" : null);
 });
 
 it("忘记失败会保留已存状态并显示原因，成功后回到手动输入", async () => {
   fixture.status.mockResolvedValue({ available: true, supported: true });
-  fixture.forget.mockRejectedValueOnce(new Error("钥匙串暂不可用"));
+  fixture.forget.mockRejectedValueOnce(new Error("本地凭据存储暂不可用"));
   const user = userEvent.setup();
   render(<ConnectionDialog attempt={attempt} working={false} error=""
     onCancel={() => {}} onTrust={async () => {}} onAuthenticate={async () => {}} />);
   await user.click(await screen.findByRole("button", { name: "忘记已保存凭据" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("钥匙串暂不可用");
+  expect(await screen.findByRole("alert")).toHaveTextContent("本地凭据存储暂不可用");
   expect(screen.getByText("已保存密码")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "忘记已保存凭据" }));
   expect(await screen.findByLabelText("密码")).toBeInTheDocument();
@@ -140,6 +164,30 @@ it("新建连接直接提供密码和记住密码选项", async () => {
   expect(screen.getByRole("checkbox", { name: /记住密码/ })).not.toBeChecked();
   expect(screen.getByRole("button", { name: "测试连接" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "保存并连接" })).toBeInTheDocument();
+});
+
+it.each(credentialMethods)("%s 记住选项说明本机加密、自动复用及密钥风险，取消勾选后不保存", async (authMethod, rememberName) => {
+  const user = userEvent.setup();
+  const submit = vi.fn().mockResolvedValue(undefined);
+  const authProfile = { ...profile, authMethod, privateKeyPath: authMethod === "privateKey" ? "/isolated/id_ed25519" : null };
+  render(<ConnectionDialog attempt={{ ...attempt, profile: authProfile }} working={false} error=""
+    onCancel={() => {}} onTrust={async () => {}} onAuthenticate={submit} />);
+  const remember = await screen.findByRole("checkbox", { name: rememberName });
+  expect(remember).not.toBeChecked();
+  expect(remember).toHaveAccessibleDescription(/本机.*加密保存.*下次连接.*自动使用/);
+  expect(remember).toHaveAccessibleDescription(/密钥.*本机.*读取.*密钥.*凭据.*解密/);
+  expect(remember.closest("label")).toHaveAttribute("title", expect.stringMatching(/本机.*加密保存/));
+  await user.type(screen.getByLabelText(authMethod === "password" ? "密码" : "私钥口令"), "temporary-secret");
+  if (authMethod === "privateKeyContent") {
+    await user.type(screen.getByLabelText("私钥内容"), "temporary-private-key");
+  }
+  await user.click(remember);
+  expect(remember).toBeChecked();
+  await user.click(remember);
+  expect(remember).not.toBeChecked();
+  await user.click(screen.getByRole("button", { name: "连接" }));
+  expect(submit).toHaveBeenCalledWith("temporary-secret", false,
+    authMethod === "privateKeyContent" ? "temporary-private-key" : null);
 });
 
 it("SSH 认证支持粘贴私钥内容和单独的私钥口令", async () => {
@@ -212,21 +260,60 @@ it("测试草稿连接不保存配置，测试成功后回到保留输入的编�
   expect(screen.getByLabelText("连接名称")).toHaveValue("测试环境");
 });
 
-it("保存并连接将认证信息单独传递而不混入配置对象", async () => {
+it.each(credentialMethods)("%s 勾选记住后保存并连接将认证信息与配置分开", async (authMethod, rememberName) => {
   const user = userEvent.setup();
   let saved: unknown[] = [];
   render(<ProfileDialog profile={null} onSave={async (...args) => { saved = args; }} onClose={() => {}} />);
   await user.type(screen.getByLabelText("连接名称"), "测试环境");
   await user.type(screen.getByLabelText("主机地址"), "test.example.invalid");
   await user.type(screen.getByLabelText("用户名"), "tester");
-  await user.type(screen.getByLabelText("密码"), "test-password-only");
-  await user.click(screen.getByRole("checkbox", { name: /记住密码/ }));
+  if (authMethod !== "password") {
+    await user.click(screen.getByRole("radio", { name: "SSH 私钥" }));
+    if (authMethod === "privateKey") {
+      await user.type(screen.getByLabelText("私钥文件"), "/isolated/id_ed25519");
+    } else {
+      await user.click(screen.getByRole("radio", { name: "粘贴私钥" }));
+    }
+  }
+  const remember = screen.getByRole("checkbox", { name: rememberName });
+  await waitFor(() => expect(remember).toBeEnabled());
+  expect(remember).not.toBeChecked();
+  await user.type(screen.getByLabelText(authMethod === "password" ? "密码" : "私钥口令"), "test-secret-only");
+  if (authMethod === "privateKeyContent") {
+    await user.type(screen.getByLabelText("私钥内容"), "test-private-key-only");
+  }
+  await user.click(remember);
+  expect(remember).toBeChecked();
   await user.click(screen.getByRole("button", { name: "保存并连接" }));
   await waitFor(() => expect(saved).toHaveLength(3));
-  expect(saved[0]).not.toHaveProperty("password");
-  expect(saved[0]).not.toHaveProperty("secret");
-  expect(saved[1]).toEqual({ secret: "test-password-only", privateKeyContent: null, remember: true });
+  expect(saved[0]).toEqual({
+    id: expect.any(String), name: "测试环境", host: "test.example.invalid", port: 22, username: "tester",
+    authMethod, privateKeyPath: authMethod === "privateKey" ? "/isolated/id_ed25519" : null,
+    remotePath: ".", groupId: null,
+  });
+  expect(saved[1]).toEqual({
+    secret: "test-secret-only", privateKeyContent: authMethod === "privateKeyContent" ? "test-private-key-only" : null,
+    remember: true,
+  });
   expect(saved[2]).toBe(true);
+});
+
+it.each(credentialMethods)("%s 即使勾选记住，仅保存配置也不传递认证秘密", async (authMethod, rememberName) => {
+  const user = userEvent.setup();
+  const save = vi.fn().mockResolvedValue(undefined);
+  const authProfile = { ...profile, authMethod, privateKeyPath: authMethod === "privateKey" ? "/isolated/id_ed25519" : null };
+  render(<ProfileDialog profile={authProfile} onSave={save} onClose={() => {}} />);
+  const remember = screen.getByRole("checkbox", { name: rememberName });
+  await waitFor(() => expect(remember).toBeEnabled());
+  await user.type(screen.getByLabelText(authMethod === "password" ? "密码" : "私钥口令"), "unsaved-secret");
+  if (authMethod === "privateKeyContent") {
+    await user.type(screen.getByLabelText("私钥内容"), "unsaved-private-key");
+  }
+  await user.click(remember);
+  expect(remember).toBeChecked();
+  await user.click(screen.getByRole("button", { name: "仅保存配置" }));
+  expect(save).toHaveBeenCalledWith({ ...authProfile, groupId: null },
+    { secret: "", privateKeyContent: null, remember: false }, false);
 });
 
 it("同一帧重复提交表单只保存一次", async () => {
@@ -261,8 +348,21 @@ it("不支持安全存储的平台不显示记住密码，配置保存也不携�
 });
 
 it("凭据状态查询失败不会重新启用平台明确禁用的记住密码功能", async () => {
-  fixture.status.mockRejectedValue(new Error("安全存储未接入"));
+  fixture.status.mockRejectedValue(new Error("本地凭据存储未接入"));
   render(<ProfileDialog profile={profile} credentialStorage={false} onSave={async () => {}} onClose={() => {}} />);
   await waitFor(() => expect(screen.getByLabelText("密码")).toBeEnabled());
   expect(screen.queryByRole("checkbox", { name: /记住密码/ })).not.toBeInTheDocument();
+});
+
+it("本地凭据状态查询失败后仍可手动临时认证", async () => {
+  fixture.status.mockRejectedValue(new Error("本地凭据存储损坏"));
+  const user = userEvent.setup();
+  const submit = vi.fn().mockResolvedValue(undefined);
+  render(<ConnectionDialog attempt={attempt} working={false} error=""
+    onCancel={() => {}} onTrust={async () => {}} onAuthenticate={submit} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("本地凭据存储损坏，可重新输入后连接");
+  await user.type(screen.getByLabelText("密码"), "temporary-password");
+  expect(screen.getByRole("checkbox", { name: "连接成功后记住密码" })).not.toBeChecked();
+  await user.click(screen.getByRole("button", { name: "连接" }));
+  expect(submit).toHaveBeenCalledWith("temporary-password", false, null);
 });

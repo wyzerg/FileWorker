@@ -5,6 +5,8 @@ import type { AuthMethod } from "../lib/types";
 import type { useAuthentication } from "../lib/useAuthentication";
 import { IconButton } from "./IconButton";
 
+const localCredentialStorageHint = "仅在本机加密保存，下次连接自动使用；解密密钥也在本机，能读取密钥和凭据文件的人可解密。";
+
 export function CredentialFields({ authMethod, credentials, savedMatches = true, disabled = false }: {
   authMethod: AuthMethod;
   credentials: ReturnType<typeof useAuthentication>;
@@ -20,7 +22,7 @@ export function CredentialFields({ authMethod, credentials, savedMatches = true,
     <div className="credential-fields">
       {usingSaved ? <div className="saved-credential">
         <ShieldCheck size={17} />
-        <span>{privateKey ? "已保存私钥凭据" : "已保存密码"}</span>
+        <span title={localCredentialStorageHint}>{privateKey ? "已保存私钥凭据" : "已保存密码"}</span>
         <button type="button" className="text-button" disabled={disabled} onClick={credentials.manual}>
           {privateKey ? "更换凭据" : "更换密码"}
         </button>
@@ -42,8 +44,8 @@ export function CredentialFields({ authMethod, credentials, savedMatches = true,
               onClick={() => setVisible((value) => !value)}>{visible ? <EyeOff size={17} /> : <Eye size={17} />}</IconButton>
           </div>
         </div>
-        {credentials.status.supported && <label className="check-field">
-          <input type="checkbox" checked={credentials.remember} disabled={disabled}
+        {credentials.status.supported && <label className="check-field" title={localCredentialStorageHint}>
+          <input type="checkbox" checked={credentials.remember} disabled={disabled} aria-description={localCredentialStorageHint}
             onChange={(event) => credentials.setRemember(event.target.checked)} />
           {authMethod === "password" ? "连接成功后记住密码" : authMethod === "privateKeyContent" ? "连接成功后记住私钥和口令" : "连接成功后记住私钥口令"}
         </label>}

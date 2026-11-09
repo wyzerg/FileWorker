@@ -63,7 +63,7 @@ pub fn get_environment(state: State<'_, AppState>) -> Result<Environment, CoreEr
             .collect(),
         runtime: "desktop",
         finder_drop: cfg!(target_os = "macos"),
-        credential_storage: cfg!(target_os = "macos"),
+        credential_storage: state.remote.credential_storage_supported(),
     })
 }
 

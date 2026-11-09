@@ -1,11 +1,13 @@
 mod commands;
-mod credentials;
 mod finder_drop;
 mod remote;
 mod transfers;
 
 use commands::AppState;
-use fileworker_core::{profile_service::ProfileService, profiles::ProfileStore};
+use fileworker_core::{
+    local_credentials::LocalCredentialStore, profile_service::ProfileService,
+    profiles::ProfileStore,
+};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -16,10 +18,11 @@ pub fn run() {
         .setup(|app| {
             let home = app.path().home_dir()?;
             let root = app.path().app_data_dir()?;
+            let credentials = Arc::new(LocalCredentialStore::new(root.clone()));
             let remote = Arc::new(fileworker_core::connections::ConnectionManager::new(
                 root.clone(),
                 home.clone(),
-                Arc::new(credentials::NativeCredentialStore),
+                credentials.clone(),
             ));
             let transfers = Arc::new(fileworker_core::transfers::TransferManager::new(
                 remote.clone(),
@@ -27,7 +30,7 @@ pub fn run() {
             let connection_tests = Arc::new(fileworker_core::connections::ConnectionManager::new(
                 root.clone(),
                 home.clone(),
-                Arc::new(credentials::NativeCredentialStore),
+                credentials,
             ));
             app.manage(AppState {
                 home,

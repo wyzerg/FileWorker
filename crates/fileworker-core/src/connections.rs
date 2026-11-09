@@ -327,7 +327,7 @@ impl ConnectionManager {
             if handle.canceled.load(Ordering::SeqCst) {
                 return Err(expired());
             }
-            // The OS may show a Keychain prompt; never hold the lifecycle lock while waiting.
+            // Storage I/O may wait; never hold the lifecycle lock during credential access.
             let operation = remember
                 .then(|| self.credential_operation(&account))
                 .transpose()?;
@@ -344,14 +344,16 @@ impl ConnectionManager {
                     Err(error) => Err(error),
                 };
                 self.check_attempt(attempt_id, &handle.canceled)?;
-                match previous
-                    .and_then(|previous| self.credentials.set(&account, &secret).map(|_| previous))
-                {
+                match previous {
                     Ok(previous) => {
+                        // A failed write may already have replaced the file before sync failed.
                         saved = Some(previous);
-                        None
+                        self.credentials
+                            .set(&account, &secret)
+                            .err()
+                            .map(|_| "已连接，但凭据未能保存到本地加密存储，本次仍可使用".into())
                     }
-                    Err(_) => Some("已连接，但凭据未能保存到系统安全存储，本次仍可使用".into()),
+                    Err(_) => Some("已连接，但凭据未能保存到本地加密存储，本次仍可使用".into()),
                 }
             } else {
                 None
@@ -399,7 +401,7 @@ impl ConnectionManager {
                 if restored.is_err() {
                     return Err(CoreError::new(
                         "attempt_expired",
-                        "连接已取消或过期，但未能恢复原来的钥匙串凭据，请从连接菜单忘记已存凭据",
+                        "连接已取消或过期，但未能恢复原来的本地凭据，请从连接菜单忘记已存凭据",
                     ));
                 }
             }

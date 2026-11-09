@@ -132,7 +132,7 @@ struct MetadataOnly {
 
 impl CredentialStore for MetadataOnly {
     fn get(&self, _: &str) -> Result<Zeroizing<String>, CoreError> {
-        panic!("元数据查询不能读取密码或触发钥匙串秘密访问")
+        panic!("元数据查询不能读取已保存秘密")
     }
 
     fn exists(&self, account: &str) -> Result<bool, CoreError> {

@@ -34,5 +34,6 @@ id_ed25519*
 /profiles.lock
 /known_hosts.json
 /known_hosts.lock
+credentials-v1/
 .fileworker-*.part
 .fileworker-*.backup

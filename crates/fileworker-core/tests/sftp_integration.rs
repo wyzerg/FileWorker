@@ -2,6 +2,7 @@ use fileworker_core::{
     connections::ConnectionManager,
     credentials::{CredentialStore, credential_account},
     error::CoreError,
+    local_credentials::LocalCredentialStore,
     profile_service::ProfileService,
     profiles::{AuthMethod, ConnectionGroup, ConnectionProfile, ProfileStore},
     remote_files::{RemoteFileAction, RemotePreview},
@@ -123,6 +124,40 @@ impl CredentialStore for BlockingCredentials {
     }
 }
 
+struct PostCommitFailure {
+    store: LocalCredentialStore,
+    reported: AtomicBool,
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl CredentialStore for PostCommitFailure {
+    fn get(&self, account: &str) -> Result<Zeroizing<String>, CoreError> {
+        self.store.get(account)
+    }
+
+    fn set(&self, account: &str, secret: &str) -> Result<(), CoreError> {
+        self.store.set(account, secret)?;
+        if !self.reported.swap(true, Ordering::SeqCst) {
+            self.entered.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            return Err(CoreError::new(
+                "credential_unavailable",
+                "injected post-commit sync failure",
+            ));
+        }
+        Ok(())
+    }
+
+    fn delete(&self, account: &str) -> Result<(), CoreError> {
+        self.store.delete(account)
+    }
+}
+
 fn wait_until(condition: impl Fn() -> bool, timeout: Duration) -> bool {
     let started = Instant::now();
     while started.elapsed() < timeout {
@@ -138,6 +173,8 @@ struct Server {
     child: Child,
     port: u16,
     key_path: String,
+    #[cfg(unix)]
+    root: PathBuf,
 }
 impl Server {
     fn start(root: &Path, port: u16, key: &str) -> Self {
@@ -173,6 +210,8 @@ impl Server {
             child,
             port: ready["port"].as_u64().unwrap() as u16,
             key_path: ready["keyPath"].as_str().unwrap().into(),
+            #[cfg(unix)]
+            root: root.into(),
         }
     }
     fn profile(&self) -> ConnectionProfile {
@@ -193,6 +232,14 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let denied = self.root.join("files/denied");
+            if fs::symlink_metadata(&denied).is_ok_and(|metadata| metadata.is_dir()) {
+                let _ = fs::set_permissions(denied, fs::Permissions::from_mode(0o700));
+            }
+        }
     }
 }
 fn id() -> String {
@@ -200,6 +247,339 @@ fn id() -> String {
 }
 fn secret(value: &str) -> Option<Zeroizing<String>> {
     Some(Zeroizing::new(value.into()))
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn isolated_server_restores_denied_directory_permissions_for_complete_fixture_cleanup() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let path = fixture.path().to_owned();
+    let server = Server::start(fixture.path(), 0, "host");
+    drop(server);
+    let result = fixture.close();
+    if result.is_err() {
+        fs::set_permissions(path.join("files/denied"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&path).unwrap();
+    }
+    assert!(
+        result.is_ok(),
+        "SFTP fixture cleanup must remove all generated files"
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn interrupted_local_credentials_initialization_can_be_retried_through_authentication() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let mut directory = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory
+        .create(config.path().join("credentials-v1"))
+        .unwrap();
+    let store = Arc::new(LocalCredentialStore::new(config.path().into()));
+    let manager =
+        ConnectionManager::new(config.path().into(), fixture.path().into(), store.clone());
+    let profile = server.profile();
+    assert!(!manager.credential_status(&profile).unwrap().available);
+    let attempt = id();
+    manager.probe(attempt.clone(), profile.clone()).unwrap();
+    manager.trust(&attempt).unwrap();
+    let connected = manager
+        .authenticate(&attempt, secret("test-password-only"), true)
+        .unwrap();
+    assert!(connected.warning.is_none());
+    assert_eq!(
+        store.get(&credential_account(&profile)).unwrap().as_str(),
+        "test-password-only"
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn canceled_post_commit_save_failures_restore_the_previous_local_credential() {
+    let fixture = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    for previous in [None, Some("previous-saved-value")] {
+        let config = tempfile::tempdir().unwrap();
+        let local = LocalCredentialStore::new(config.path().into());
+        let profile = server.profile();
+        let account = credential_account(&profile);
+        if let Some(previous) = previous {
+            local.set(&account, previous).unwrap();
+        }
+        let (entered, started) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let store = Arc::new(PostCommitFailure {
+            store: local,
+            reported: AtomicBool::new(false),
+            entered,
+            release: Mutex::new(resume),
+        });
+        let manager = Arc::new(ConnectionManager::new(
+            config.path().into(),
+            fixture.path().into(),
+            store.clone(),
+        ));
+        let attempt = id();
+        manager.probe(attempt.clone(), profile).unwrap();
+        manager.trust(&attempt).unwrap();
+        let worker = {
+            let manager = manager.clone();
+            let attempt = attempt.clone();
+            std::thread::spawn(move || {
+                manager.authenticate(&attempt, secret("test-password-only"), true)
+            })
+        };
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(store.get(&account).unwrap().as_str(), "test-password-only");
+        manager.cancel(&attempt).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(worker.join().unwrap().unwrap_err().code, "attempt_expired");
+        if let Some(previous) = previous {
+            assert_eq!(store.get(&account).unwrap().as_str(), previous);
+        } else {
+            assert_eq!(store.get(&account).unwrap_err().code, "credential_missing");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn local_credentials_save_after_authentication_and_reconnect_after_restart() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let profile = server.profile();
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(LocalCredentialStore::new(config.path().into())),
+    );
+    let attempt = id();
+    manager.probe(attempt.clone(), profile.clone()).unwrap();
+    assert_eq!(
+        manager
+            .authenticate(&attempt, None, false)
+            .unwrap_err()
+            .code,
+        "host_not_trusted"
+    );
+    assert!(!config.path().join("credentials-v1").exists());
+    manager.trust(&attempt).unwrap();
+    assert_eq!(
+        manager
+            .authenticate(&attempt, secret("wrong-password"), true)
+            .unwrap_err()
+            .code,
+        "authentication_failed"
+    );
+    assert!(!config.path().join("credentials-v1").exists());
+    let temporary = manager
+        .authenticate(&attempt, secret("test-password-only"), false)
+        .unwrap();
+    assert!(!config.path().join("credentials-v1").exists());
+    manager.disconnect(&temporary.session_id).unwrap();
+    let attempt = id();
+    manager.probe(attempt.clone(), profile.clone()).unwrap();
+    let connected = manager
+        .authenticate(&attempt, secret("test-password-only"), true)
+        .unwrap();
+    assert!(connected.warning.is_none());
+    assert!(manager.credential_status(&profile).unwrap().available);
+    manager.shutdown();
+    drop(manager);
+
+    let restarted = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(LocalCredentialStore::new(config.path().into())),
+    );
+    let attempt = id();
+    assert!(
+        restarted
+            .probe(attempt.clone(), profile.clone())
+            .unwrap()
+            .trusted
+    );
+    let connected = restarted.authenticate(&attempt, None, false).unwrap();
+    assert_eq!(
+        restarted.list(&connected.session_id, "/").unwrap().path,
+        "/"
+    );
+    restarted.forget_credential(&profile).unwrap();
+    assert!(!restarted.credential_status(&profile).unwrap().available);
+    assert_eq!(
+        restarted.list(&connected.session_id, "/").unwrap().path,
+        "/"
+    );
+    restarted.disconnect(&connected.session_id).unwrap();
+    let attempt = id();
+    restarted.probe(attempt.clone(), profile).unwrap();
+    assert_eq!(
+        restarted
+            .authenticate(&attempt, None, false)
+            .unwrap_err()
+            .code,
+        "credential_missing"
+    );
+    restarted.cancel(&attempt).unwrap();
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn local_credentials_key_files_and_pasted_keys_are_reusable_after_restart() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    for (method, filename, passphrase) in [
+        (AuthMethod::PrivateKey, "client.pem", "test-key-passphrase"),
+        (
+            AuthMethod::PrivateKeyContent,
+            "client-ed25519",
+            "test-ed25519-passphrase",
+        ),
+        (AuthMethod::PrivateKeyContent, "client-plain", ""),
+    ] {
+        let mut profile = server.profile();
+        profile.id = id();
+        profile.auth_method = method.clone();
+        let input = if method == AuthMethod::PrivateKey {
+            profile.private_key_path = Some(fixture.path().join(filename).to_str().unwrap().into());
+            passphrase.to_owned()
+        } else {
+            pasted_secret(fixture.path(), filename, passphrase)
+        };
+        let manager = ConnectionManager::new(
+            config.path().into(),
+            fixture.path().into(),
+            Arc::new(LocalCredentialStore::new(config.path().into())),
+        );
+        let attempt = id();
+        if !manager
+            .probe(attempt.clone(), profile.clone())
+            .unwrap()
+            .trusted
+        {
+            manager.trust(&attempt).unwrap();
+        }
+        let connected = manager
+            .authenticate(&attempt, secret(&input), true)
+            .unwrap();
+        assert!(connected.warning.is_none());
+        assert_eq!(manager.list(&connected.session_id, "/").unwrap().path, "/");
+        manager.shutdown();
+        drop(manager);
+        let restarted = ConnectionManager::new(
+            config.path().into(),
+            fixture.path().into(),
+            Arc::new(LocalCredentialStore::new(config.path().into())),
+        );
+        let attempt = id();
+        assert!(
+            restarted
+                .probe(attempt.clone(), profile.clone())
+                .unwrap()
+                .trusted
+        );
+        let connected = restarted.authenticate(&attempt, None, false).unwrap();
+        assert!(connected.warning.is_none());
+        assert_eq!(
+            restarted.list(&connected.session_id, "/").unwrap().path,
+            "/"
+        );
+        restarted.forget_credential(&profile).unwrap();
+        assert!(!restarted.credential_status(&profile).unwrap().available);
+        assert_eq!(
+            restarted.list(&connected.session_id, "/").unwrap().path,
+            "/"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn local_credentials_follow_profile_identity_without_affecting_other_connections() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let store = Arc::new(LocalCredentialStore::new(config.path().into()));
+    let manager = Arc::new(ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        store.clone(),
+    ));
+    let profiles = ProfileService::new(ProfileStore::new(config.path().into()), manager.clone());
+    let first = profiles.save(server.profile()).unwrap();
+    let mut second = first.clone();
+    second.id = id();
+    profiles.save(second.clone()).unwrap();
+    for profile in [&first, &second] {
+        let attempt = id();
+        let probe = profiles.probe(&profile.id, attempt.clone()).unwrap();
+        if !probe.trusted {
+            manager.trust(&attempt).unwrap();
+        }
+        assert!(
+            manager
+                .authenticate(&attempt, secret("test-password-only"), true)
+                .unwrap()
+                .warning
+                .is_none()
+        );
+    }
+    let mut renamed = first.clone();
+    renamed.name = "renamed-fixture".into();
+    profiles.save(renamed.clone()).unwrap();
+    assert!(manager.credential_status(&renamed).unwrap().available);
+    renamed.username = "new-fixture-identity".into();
+    profiles.save(renamed.clone()).unwrap();
+    assert!(!store.exists(&credential_account(&first)).unwrap());
+    assert!(!manager.credential_status(&renamed).unwrap().available);
+    assert!(manager.credential_status(&second).unwrap().available);
+    profiles.delete(&second.id).unwrap();
+    assert!(!store.exists(&credential_account(&second)).unwrap());
+    assert_eq!(profiles.store().list().unwrap(), vec![renamed]);
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn local_credentials_storage_failure_keeps_the_authenticated_session_usable() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    fs::write(config.path().join("credentials-v1"), b"blocked-store-path").unwrap();
+    let manager = ConnectionManager::new(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(LocalCredentialStore::new(config.path().into())),
+    );
+    let attempt = id();
+    manager.probe(attempt.clone(), server.profile()).unwrap();
+    manager.trust(&attempt).unwrap();
+    let connected = manager
+        .authenticate(&attempt, secret("test-password-only"), true)
+        .unwrap();
+    assert!(
+        connected
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("本地加密存储")
+    );
+    assert_eq!(manager.list(&connected.session_id, "/").unwrap().path, "/");
+    assert_eq!(
+        fs::read(config.path().join("credentials-v1")).unwrap(),
+        b"blocked-store-path"
+    );
 }
 
 fn connected_manager(
@@ -1599,7 +1979,7 @@ fn changed_host_during_authentication_retry_is_blocked_before_reading_saved_cred
 
 #[test]
 #[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
-fn expiry_closes_the_socket_and_prevents_authentication_after_a_keychain_wait() {
+fn expiry_closes_the_socket_and_prevents_authentication_after_a_credential_read_wait() {
     let fixture = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let server = Server::start(fixture.path(), 0, "host");
@@ -1743,7 +2123,7 @@ fn canceled_credential_saves_restore_the_previous_value_without_touching_the_new
 
 #[test]
 #[ignore = "requires target/sftp-test-venv with asyncssh; see README"]
-fn a_canceled_keychain_prompt_does_not_block_another_credential_identity() {
+fn a_canceled_credential_read_does_not_block_another_credential_identity() {
     let fixture = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     let server = Server::start(fixture.path(), 0, "host");
@@ -1792,7 +2172,7 @@ fn a_canceled_keychain_prompt_does_not_block_another_credential_identity() {
     let connected = next_auth.join().unwrap().unwrap();
     assert!(
         independent,
-        "an unrelated credential must not wait for an old Keychain prompt"
+        "an unrelated credential must not wait for an old credential read"
     );
     assert_eq!(manager.list(&connected.session_id, "/").unwrap().path, "/");
 }
