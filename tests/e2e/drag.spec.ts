@@ -43,6 +43,7 @@ async function installDesktopFixture(page: Page) {
               }
               revision += 1; return jobs.map((job) => job.id);
             case "cancel_connection":
+            case "check_session":
             case "disconnect_session":
             case "plugin:window|set_theme": return;
             default: throw new Error(`未配置命令：${command}`);

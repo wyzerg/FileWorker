@@ -47,6 +47,7 @@ async function installTransferFixture(page: Page, conflictCount = 1) {
             case "set_transfer_concurrency": concurrency = Number(args.concurrency); revision += 1; return;
             case "clear_finished_transfers": jobs = []; revision += 1; return;
             case "cancel_connection":
+            case "check_session":
             case "disconnect_session":
             case "plugin:window|set_theme": return;
             default: throw new Error(`未配置命令：${command}`);

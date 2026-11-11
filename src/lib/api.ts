@@ -150,6 +150,8 @@ export const api = {
     desktopCommand("cancel_test_connection", { attemptId }),
   cancelConnection: (attemptId: string): Promise<void> =>
     desktopCommand("cancel_connection", { attemptId }),
+  checkSession: (sessionId: string): Promise<void> =>
+    desktopCommand("check_session", { sessionId }),
   listRemoteDirectory: (sessionId: string, path: string): Promise<DirectoryListing> =>
     desktopCommand("list_remote_directory", { sessionId, path }),
   previewRemoteFile: (sessionId: string, path: string): Promise<RemotePreview> =>

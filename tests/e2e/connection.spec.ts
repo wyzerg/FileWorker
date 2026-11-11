@@ -30,6 +30,9 @@ test("连接确认、认证和远程列表在明暗及窄视口下保持完整",
               if (!trusted) throw { code: "host_not_trusted", message: "主机尚未信任" };
               authenticated = true;
               return { sessionId: "e2e-session", profileId: profile.id, initialPath: "/", warning: null };
+            case "check_session":
+              if (!authenticated || args.sessionId !== "e2e-session") throw { code: "session_closed", message: "连接已关闭，请重新连接" };
+              return;
             case "list_remote_directory":
               if (!authenticated) throw { message: "尚未认证" };
               if (args.path === "/denied") throw { code: "remote_directory", message: "没有读取权限" };

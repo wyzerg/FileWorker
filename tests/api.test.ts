@@ -18,6 +18,7 @@ describe("浏览器预览存储", () => {
       () => api.authenticateConnection("attempt", "not-a-real-password", true),
       () => api.cancelConnection("attempt"),
       () => api.listRemoteDirectory("session", "/"),
+      () => api.checkSession("session"),
       () => api.disconnectSession("session"),
       () => api.forgetCredential(profile.id),
       () => api.enqueueTransfers([]),

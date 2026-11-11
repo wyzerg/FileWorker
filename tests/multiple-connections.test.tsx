@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import type { ConnectionProfile, TransferJob, TransferSnapshot } from "../src/lib/types";
@@ -6,7 +6,7 @@ import type { ConnectionProfile, TransferJob, TransferSnapshot } from "../src/li
 const fixture = vi.hoisted(() => ({
   profiles: [] as ConnectionProfile[], attempts: new Map<string, string>(),
   active: new Map<string, string>(), snapshot: { revision: 0, concurrency: 3, jobs: [] } as TransferSnapshot,
-  disconnect: vi.fn(), list: vi.fn(), auth: vi.fn(), enqueue: vi.fn(), save: vi.fn(), remove: vi.fn(),
+  disconnect: vi.fn(), list: vi.fn(), auth: vi.fn(), enqueue: vi.fn(), save: vi.fn(), remove: vi.fn(), check: vi.fn(),
 }));
 const profiles: ConnectionProfile[] = [
   { id: "0a4a976f-ddc8-4e60-8b8f-de2532f0212d", name: "生产服务器", host: "production.invalid", port: 22, username: "tester", authMethod: "password", privateKeyPath: null, remotePath: "." },
@@ -42,6 +42,7 @@ vi.mock("../src/lib/api", () => ({
     listRemoteDirectory: (...args: unknown[]) => fixture.list(...args),
     cancelConnection: async () => {},
     disconnectSession: (...args: unknown[]) => fixture.disconnect(...args),
+    checkSession: (...args: unknown[]) => fixture.check(...args),
     transferSnapshot: async () => fixture.snapshot,
     enqueueTransfers: (...args: unknown[]) => fixture.enqueue(...args),
     saveProfile: (...args: unknown[]) => fixture.save(...args),
@@ -60,6 +61,7 @@ beforeEach(() => {
     return { sessionId: `session-${id}`, profileId: id, initialPath: "/", warning: null };
   });
   fixture.disconnect.mockImplementation(async (id) => { fixture.active.delete(id); });
+  fixture.check.mockResolvedValue(undefined);
   fixture.list.mockImplementation(async (id, path) => {
     if (!fixture.active.has(id)) throw { code: "session_closed", message: "原连接已关闭" };
     return { path, parentPath: path === "/" ? null : "/", warnings: [], entries: [entry(`${path === "/" ? "" : path}/folder`, true)] };
@@ -193,4 +195,31 @@ it("same-path remote files never inherit another connected server's selection", 
   expect(remote().getByRole("button", { name: "删除" })).toBeDisabled();
   fireEvent.click(profileButton("生产服务器"));
   expect(remote().getByLabelText("选择 shared.txt")).not.toBeChecked();
+});
+
+it("focus recovery marks only a dead background connection offline and names it in the notice", async () => {
+  render(<App />);
+  await screen.findByText("upload.txt");
+  await connect("生产服务器");
+  await connect("测试服务器");
+  const directoryCalls = fixture.list.mock.calls.length;
+  fixture.check.mockImplementation(async (id) => {
+    if (id === sessionA) throw { code: "connection_lost", message: "服务器连接已中断，请重新连接" };
+  });
+  await act(async () => { fireEvent.focus(window); });
+  expect(within(profileButton("生产服务器")).queryByText("已连接")).not.toBeInTheDocument();
+  expect(within(profileButton("测试服务器")).getByText("已连接")).toBeVisible();
+  expect(screen.getByRole("button", { name: "断开服务器" })).toBeEnabled();
+  expect(screen.getByLabelText("远程路径")).toHaveValue("/");
+  expect(screen.getByRole("alert")).toHaveTextContent("生产服务器");
+  expect(screen.getByRole("alert")).toHaveTextContent("服务器连接已中断");
+  expect(fixture.disconnect).toHaveBeenCalledExactlyOnceWith(sessionA);
+  expect(fixture.list).toHaveBeenCalledTimes(directoryCalls);
+  fireEvent.click(profileButton("生产服务器"));
+  const remote = within(screen.getByRole("region", { name: "远程文件" }));
+  expect(remote.getByRole("alert")).toHaveTextContent("服务器连接已中断");
+  expect(remote.getByRole("button", { name: "连接服务器" })).toBeEnabled();
+  expect(remote.getByRole("button", { name: "下载所选文件" })).toBeDisabled();
+  expect(remote.queryByText("folder")).not.toBeInTheDocument();
+  expect(fixture.auth).toHaveBeenCalledTimes(2);
 });

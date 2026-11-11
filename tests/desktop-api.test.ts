@@ -37,3 +37,10 @@ it("远程文件请求带上明确的会话、路径和操作参数", async () =
     ["mutate_remote_file", { sessionId: "session", path: "/logs/app.log", action: { kind: "rename", name: "old.log" } }],
   ]);
 });
+
+it("会话巡检使用独立命令和精确会话 ID，不读取远程目录", async () => {
+  await api.checkSession("session-health");
+  expect(fixture.invoke.mock.calls).toEqual([
+    ["check_session", { sessionId: "session-health" }],
+  ]);
+});

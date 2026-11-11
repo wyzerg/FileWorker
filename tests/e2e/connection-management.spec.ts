@@ -95,6 +95,7 @@ async function installConnectionFixture(page: Page) {
             case "forget_credential": saved = false; return;
             case "cancel_connection":
             case "cancel_test_connection":
+            case "check_session":
             case "disconnect_session":
             case "plugin:window|set_theme": return;
             default: throw new Error(`未配置命令：${command}`);

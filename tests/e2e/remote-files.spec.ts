@@ -66,6 +66,7 @@ async function installFixture(page: Page, options: { failDeleteOnce?: string; ex
               }
               return;
             }
+            case "check_session":
             case "disconnect_session":
             case "cancel_connection":
             case "plugin:window|set_theme": return;

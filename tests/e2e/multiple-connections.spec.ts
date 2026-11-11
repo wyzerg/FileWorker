@@ -45,6 +45,9 @@ test("切换已连接服务器保持目录和后台传输，仅显式断开目�
               active.add(sessionId);
               return { sessionId, profileId, initialPath: "/", warning: null };
             }
+            case "check_session":
+              if (!active.has(String(args.sessionId))) throw { code: "session_closed", message: "连接已关闭，请重新连接" };
+              return;
             case "list_remote_directory": {
               if (!active.has(String(args.sessionId))) throw { code: "session_closed", message: "连接已关闭" };
               const path = String(args.path);

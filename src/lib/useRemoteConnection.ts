@@ -1,5 +1,5 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, errorCode, errorMessage } from "./api";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { api, errorCode, errorMessage, isDesktop } from "./api";
 import type { AuthenticationInput, ConnectedSession, ConnectionAttempt, ConnectionProfile, DirectoryListing } from "./types";
 import { credentialIdentity } from "./useAuthentication";
 import { readRemoteLocation, rememberRemoteLocation } from "./remoteLocations";
@@ -23,6 +23,11 @@ function workspace(profile: ConnectionProfile): Workspace {
     profile, identity: credentialIdentity(profile), session: null, listing: null, path: "", parentPath: null,
     error: "", loading: false, acceptedPath: "/", history: { paths: [], index: -1 }, request: 0,
   };
+}
+
+function isSessionFailure(cause: unknown): boolean {
+  const code = errorCode(cause);
+  return code === "connection_lost" || code === "session_closed";
 }
 
 export function useRemoteConnection(
@@ -93,6 +98,52 @@ export function useRemoteConnection(
     if (changed) update();
   }, [profile, profiles, cancelAttempt, release, update]);
 
+  const isCurrentSession = useCallback((view: Workspace, active: ConnectedSession) =>
+    mounted.current && workspaces.current.get(view.profile.id) === view && view.session === active, []);
+  const invalidateSession = useCallback((view: Workspace, active: ConnectedSession, cause: unknown) => {
+    if (!isSessionFailure(cause) || !isCurrentSession(view, active)) return;
+    view.request += 1;
+    view.session = null; view.listing = null; view.loading = false; view.error = errorMessage(cause);
+    update();
+    notice.current(`${view.profile.name}：${view.error}`);
+    void api.disconnectSession(active.sessionId).catch(() => {});
+  }, [isCurrentSession, update]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    let active = true;
+    const checking = new Set<ConnectedSession>();
+    const check = async (view: Workspace, session: ConnectedSession) => {
+      checking.add(session);
+      try {
+        await api.checkSession(session.sessionId);
+      } catch (cause) {
+        if (active) invalidateSession(view, session, cause);
+      } finally {
+        checking.delete(session);
+      }
+    };
+    const checkAll = () => {
+      if (!active || !mounted.current) return;
+      for (const view of workspaces.current.values()) {
+        const session = view.session;
+        if (session && !checking.has(session)) void check(view, session);
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") checkAll();
+    };
+    const timer = window.setInterval(checkAll, 30_000);
+    window.addEventListener("focus", checkAll);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", checkAll);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [invalidateSession]);
+
   const disconnectProfile = useCallback((id: string) => {
     if (attemptRef.current?.profile.id === id) cancelAttempt();
     const view = workspaces.current.get(id);
@@ -108,8 +159,7 @@ export function useRemoteConnection(
     const active = view.session;
     if (!active) return;
     const current = ++view.request;
-    const valid = () => mounted.current && workspaces.current.get(view.profile.id) === view
-      && view.request === current && view.session === active;
+    const valid = () => isCurrentSession(view, active) && view.request === current;
     const requestedPath = nextPath || view.acceptedPath;
     const absolutePath = requestedPath.startsWith("/")
       ? requestedPath : `${view.acceptedPath.replace(/\/$/u, "")}/${requestedPath}`;
@@ -122,6 +172,8 @@ export function useRemoteConnection(
       try {
         result = await api.listRemoteDirectory(active.sessionId, absolutePath);
       } catch (cause) {
+        // A superseded directory request can still prove this exact session is dead.
+        if (isSessionFailure(cause)) throw cause;
         if (!valid()) return;
         if (!fallback || fallback === absolutePath || errorCode(cause) !== "remote_directory") throw cause;
         notice.current("上次打开的目录不可用，已尝试返回连接的起始目录");
@@ -137,18 +189,14 @@ export function useRemoteConnection(
           : { paths: [...previous.paths.slice(0, previous.index + 1), result.path], index: previous.index + 1 };
       view.listing = result; view.path = result.path; view.parentPath = result.parentPath;
     } catch (cause) {
-      if (!valid()) return;
-      view.error = errorMessage(cause);
-      if (["connection_lost", "session_closed"].includes(errorCode(cause) ?? "")) {
-        view.session = null;
-        void api.disconnectSession(active.sessionId).catch(() => {});
-      }
+      if (isSessionFailure(cause)) invalidateSession(view, active, cause);
+      else if (valid()) view.error = errorMessage(cause);
     } finally {
-      if (mounted.current && view.request === current && workspaces.current.get(view.profile.id) === view) {
+      if (valid()) {
         view.loading = false; update();
       }
     }
-  }, [update]);
+  }, [invalidateSession, isCurrentSession, update]);
   const navigate = useCallback((nextPath: string, historyIndex?: number, fallback?: string) => {
     const view = selected.current;
     return view ? loadDirectory(view, nextPath, historyIndex, fallback) : Promise.resolve();

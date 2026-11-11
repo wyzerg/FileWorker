@@ -66,6 +66,7 @@ async function installFixture(page: Page) {
               });
               return jobs.map((job) => job.id);
             case "cancel_connection":
+            case "check_session":
             case "disconnect_session":
             case "plugin:window|set_theme":
             case "plugin:event|unlisten": return;
