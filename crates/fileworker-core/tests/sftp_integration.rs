@@ -612,6 +612,344 @@ fn connect_profile(manager: &ConnectionManager, profile: ConnectionProfile) -> (
     (attempt, session.session_id)
 }
 
+#[cfg(unix)]
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn remote_directory_deadline_bounds_the_whole_operation_not_each_individual_response() {
+    use std::os::unix::fs::symlink;
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let remote = ConnectionManager::with_timeouts(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_millis(500),
+        Duration::from_secs(120),
+    );
+    let (_, session) = connect_profile(&remote, server.profile());
+    for index in 0..40 {
+        symlink(
+            "hello.txt",
+            fixture.path().join(format!("files/link-{index}")),
+        )
+        .unwrap();
+    }
+    fs::write(fixture.path().join("slow-stats"), b"enabled").unwrap();
+    let started = Instant::now();
+    let result = remote.list(&session, "/");
+    let elapsed = started.elapsed();
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| matches!(error.code, "connection_lost" | "session_closed")),
+        "the full directory request must time out rather than succeed after {elapsed:?}"
+    );
+    assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    assert!(!remote.is_session_active(&session));
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn remote_directory_deadline_includes_time_queued_behind_another_operation() {
+    use std::os::unix::fs::symlink;
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let remote = Arc::new(ConnectionManager::with_timeouts(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_millis(1200),
+        Duration::from_secs(120),
+    ));
+    let (_, session) = connect_profile(&remote, server.profile());
+    for index in 0..14 {
+        symlink(
+            "hello.txt",
+            fixture.path().join(format!("files/link-{index}")),
+        )
+        .unwrap();
+    }
+    fs::write(fixture.path().join("slow-stats"), b"enabled").unwrap();
+    let listing = {
+        let remote = remote.clone();
+        let session = session.clone();
+        std::thread::spawn(move || remote.list(&session, "/"))
+    };
+    let entered = wait_until(
+        || fixture.path().join("stat-entered").exists(),
+        Duration::from_secs(2),
+    );
+    let started = Instant::now();
+    let queued = remote.list(&session, "/");
+    let elapsed = started.elapsed();
+    let first = listing.join().unwrap();
+    assert!(entered);
+    first.unwrap();
+    assert_eq!(
+        queued.unwrap_err().code,
+        "connection_lost",
+        "queueing must not grant the operation another full timeout"
+    );
+    assert!(elapsed < Duration::from_millis(1800), "{elapsed:?}");
+    assert!(!remote.is_session_active(&session));
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn health_check_detects_an_idle_server_close_without_disconnecting_another_session() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server_a = Server::start(first.path(), 0, "host");
+    let server_b = Server::start(second.path(), 0, "host");
+    let (remote, session_a) = connected_manager(first.path(), config.path(), &server_a);
+    let mut profile_b = server_b.profile();
+    profile_b.id = id();
+    let (_, session_b) = connect_profile(&remote, profile_b);
+    remote.check_session(&session_a).unwrap();
+    remote.check_session(&session_b).unwrap();
+    assert_eq!(
+        fs::read_to_string(first.path().join("connections"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    drop(server_a);
+    assert_eq!(
+        remote.check_session(&session_a).unwrap_err().code,
+        "connection_lost"
+    );
+    assert!(!remote.is_session_active(&session_a));
+    assert_eq!(
+        remote.check_session(&session_a).unwrap_err().code,
+        "session_closed"
+    );
+    assert!(remote.is_session_active(&session_b));
+    assert_eq!(remote.list(&session_b, "/folder").unwrap().path, "/folder");
+    assert_eq!(
+        fs::read_to_string(second.path().join("connections"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn health_check_treats_permission_responses_as_live_but_transport_statuses_as_lost() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    fs::write(fixture.path().join("stat-error"), b"3").unwrap();
+    remote.check_session(&session).unwrap();
+    assert!(remote.is_session_active(&session));
+    fs::remove_file(fixture.path().join("stat-error")).unwrap();
+    assert_eq!(remote.list(&session, "/").unwrap().path, "/");
+    for code in [6, 7] {
+        let (_, session) = connect_profile(&remote, server.profile());
+        fs::write(fixture.path().join("stat-error"), code.to_string()).unwrap();
+        assert_eq!(
+            remote.check_session(&session).unwrap_err().code,
+            "connection_lost"
+        );
+        assert!(!remote.is_session_active(&session));
+        fs::remove_file(fixture.path().join("stat-error")).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn health_check_does_not_queue_behind_a_busy_session_and_unresponsive_requests_expire() {
+    let fixture = tempfile::tempdir().unwrap();
+    let other_fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let other_server = Server::start(other_fixture.path(), 0, "host");
+    let remote = Arc::new(ConnectionManager::with_timeouts(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_millis(600),
+        Duration::from_secs(120),
+    ));
+    let (_, session) = connect_profile(&remote, server.profile());
+    let mut other_profile = other_server.profile();
+    other_profile.id = id();
+    let (_, other_session) = connect_profile(&remote, other_profile);
+    fs::write(fixture.path().join("pause-stat"), b"enabled").unwrap();
+    let (done, finished) = mpsc::channel();
+    let checking = {
+        let remote = remote.clone();
+        let session = session.clone();
+        std::thread::spawn(move || {
+            let result = remote.check_session(&session);
+            done.send(result).unwrap();
+        })
+    };
+    let entered = wait_until(
+        || fixture.path().join("stat-entered").exists(),
+        Duration::from_secs(2),
+    );
+    let started = Instant::now();
+    let busy_result = remote.check_session(&session);
+    let busy_elapsed = started.elapsed();
+    remote.check_session(&other_session).unwrap();
+    assert_eq!(remote.list(&other_session, "/").unwrap().path, "/");
+    let outcome = finished.recv_timeout(Duration::from_secs(2));
+    fs::remove_file(fixture.path().join("pause-stat")).unwrap();
+    checking.join().unwrap();
+    assert!(entered, "fixture must receive a real SFTP health request");
+    busy_result.unwrap();
+    assert!(
+        busy_elapsed < Duration::from_millis(200),
+        "{busy_elapsed:?}"
+    );
+    assert_eq!(outcome.unwrap().unwrap_err().code, "connection_lost");
+    assert!(!remote.is_session_active(&session));
+    assert!(remote.is_session_active(&other_session));
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn remote_mutation_timeout_closes_its_session_without_replaying_the_write() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let remote = Arc::new(ConnectionManager::with_timeouts(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_millis(500),
+        Duration::from_secs(120),
+    ));
+    let (_, session) = connect_profile(&remote, server.profile());
+    let queue = TransferManager::new(remote.clone());
+    fs::write(fixture.path().join("pause-mutation"), b"enabled").unwrap();
+    let started = Instant::now();
+    let result = queue.mutate_remote_file(
+        &session,
+        "/",
+        RemoteFileAction::CreateDirectory {
+            name: "unknown-result".into(),
+        },
+    );
+    let elapsed = started.elapsed();
+    fs::remove_file(fixture.path().join("pause-mutation")).unwrap();
+    assert!(fixture.path().join("mutation-entered").exists());
+    assert_eq!(result.unwrap_err().code, "connection_lost");
+    assert!(elapsed < Duration::from_millis(1500), "{elapsed:?}");
+    assert!(!remote.is_session_active(&session));
+    assert_eq!(
+        queue
+            .mutate_remote_file(
+                &session,
+                "/",
+                RemoteFileAction::CreateDirectory {
+                    name: "not-replayed".into()
+                },
+            )
+            .unwrap_err()
+            .code,
+        "session_closed"
+    );
+    assert!(!fixture.path().join("files/not-replayed").exists());
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn a_mutation_executed_before_a_lost_reply_is_reported_as_unknown_and_not_replayed() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let remote = Arc::new(ConnectionManager::with_timeouts(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_millis(500),
+        Duration::from_secs(120),
+    ));
+    let (_, session) = connect_profile(&remote, server.profile());
+    let queue = TransferManager::new(remote.clone());
+    fs::write(fixture.path().join("pause-mutation-reply"), b"enabled").unwrap();
+    let result = queue.mutate_remote_file(
+        &session,
+        "/",
+        RemoteFileAction::CreateDirectory {
+            name: "already-created".into(),
+        },
+    );
+    fs::remove_file(fixture.path().join("pause-mutation-reply")).unwrap();
+    assert_eq!(result.unwrap_err().code, "connection_lost");
+    assert!(!remote.is_session_active(&session));
+    assert!(fixture.path().join("files/already-created").is_dir());
+    assert_eq!(
+        fs::read_to_string(fixture.path().join("mutation-requests")).unwrap(),
+        "requested\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.path().join("mutation-replies")).unwrap(),
+        "executed\n"
+    );
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn canceled_health_checks_cannot_close_a_replacement_session_for_the_same_profile() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, old_session) = connected_manager(fixture.path(), config.path(), &server);
+    fs::write(fixture.path().join("pause-stat"), b"enabled").unwrap();
+    let checking = {
+        let remote = remote.clone();
+        let old_session = old_session.clone();
+        std::thread::spawn(move || remote.check_session(&old_session))
+    };
+    let entered = wait_until(
+        || fixture.path().join("stat-entered").exists(),
+        Duration::from_secs(2),
+    );
+    let (_, new_session) = connect_profile(&remote, server.profile());
+    fs::remove_file(fixture.path().join("pause-stat")).unwrap();
+    let old_result = checking.join().unwrap();
+    assert!(entered);
+    assert_eq!(old_result.unwrap_err().code, "session_closed");
+    assert!(!remote.is_session_active(&old_session));
+    assert!(remote.is_session_active(&new_session));
+    remote.check_session(&new_session).unwrap();
+    assert_eq!(remote.list(&new_session, "/").unwrap().path, "/");
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
+fn completed_operations_do_not_leave_deadlines_that_disconnect_idle_live_sessions() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let remote = ConnectionManager::with_timeouts(
+        config.path().into(),
+        fixture.path().into(),
+        Arc::new(MemoryCredentials::default()),
+        Duration::from_millis(400),
+        Duration::from_secs(120),
+    );
+    let (_, session) = connect_profile(&remote, server.profile());
+    assert_eq!(remote.list(&session, "/").unwrap().path, "/");
+    remote.check_session(&session).unwrap();
+    assert!(!wait_until(
+        || !remote.is_session_active(&session),
+        Duration::from_millis(900),
+    ));
+    remote.check_session(&session).unwrap();
+    assert_eq!(remote.list(&session, "/").unwrap().path, "/");
+}
+
 fn transfer_request(
     session: &str,
     source: &str,

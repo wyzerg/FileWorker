@@ -5,7 +5,7 @@ use crate::{
     local::DirectoryListing,
     profiles::ConnectionProfile,
     remote_files::{self, RemoteFileAction, RemoteFileProperties, RemotePreview},
-    sftp::SftpConnection,
+    sftp::{SftpConnection, connection_lost},
 };
 use serde::Serialize;
 use std::{
@@ -13,7 +13,7 @@ use std::{
     net::{Shutdown, TcpStream},
     path::PathBuf,
     sync::{
-        Arc, Condvar, Mutex, MutexGuard, Weak,
+        Arc, Condvar, Mutex, MutexGuard, TryLockError, Weak,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
@@ -92,6 +92,7 @@ struct Active {
     handle: Handle,
     profile: ConnectionProfile,
     secret: Arc<Zeroizing<String>>,
+    operation_started: Option<Instant>,
 }
 
 impl Handle {
@@ -124,7 +125,7 @@ impl ConnectionManager {
         let expiry_worker = {
             let inner = inner.clone();
             let expiration = expiration.clone();
-            thread::spawn(move || expire_attempts(inner, expiration, attempt_lifetime))
+            thread::spawn(move || expire_connections(inner, expiration, attempt_lifetime, timeout))
         };
         Self {
             inner,
@@ -177,7 +178,7 @@ impl ConnectionManager {
                 authenticating: false,
                 needs_reconnect: false,
             });
-            self.expiration.notify_one();
+            self.expiration.notify_all();
         }
         registered();
         let result = SftpConnection::probe(profile.clone(), self.timeout, |socket| {
@@ -226,7 +227,7 @@ impl ConnectionManager {
             connection: Arc::new(Mutex::new(connection)),
             canceled,
         });
-        self.expiration.notify_one();
+        self.expiration.notify_all();
         Ok(probe)
     }
 
@@ -366,7 +367,7 @@ impl ConnectionManager {
                 }
                 let session_id = Uuid::new_v4().to_string();
                 inner.pending.take();
-                self.expiration.notify_one();
+                self.expiration.notify_all();
                 inner.active.retain(|_, active| {
                     if active.profile.id == profile.id {
                         active.handle.close();
@@ -382,6 +383,7 @@ impl ConnectionManager {
                         handle: handle.clone(),
                         profile: profile.clone(),
                         secret: Arc::new(secret),
+                        operation_started: None,
                     },
                 );
                 Ok(ConnectedSession {
@@ -429,6 +431,29 @@ impl ConnectionManager {
         self.with_active(session_id, |connection| connection.list_directory(path))
     }
 
+    pub fn check_session(&self, session_id: &str) -> Result<(), CoreError> {
+        let started = Instant::now();
+        let handle = self.active_handle(session_id)?;
+        match handle.connection.try_lock() {
+            Ok(connection) => self.run_operation(
+                session_id,
+                &handle,
+                connection,
+                started,
+                SftpConnection::check_health,
+            ),
+            // The running operation has its own deadline; never queue a health check behind it.
+            Err(TryLockError::WouldBlock) => {
+                if handle.canceled.load(Ordering::SeqCst) {
+                    Err(closed())
+                } else {
+                    Ok(())
+                }
+            }
+            Err(TryLockError::Poisoned(_)) => Err(unavailable()),
+        }
+    }
+
     pub fn file_properties(
         &self,
         session_id: &str,
@@ -461,27 +486,94 @@ impl ConnectionManager {
         session_id: &str,
         operation: impl FnOnce(&SftpConnection) -> Result<T, CoreError>,
     ) -> Result<T, CoreError> {
-        let handle = self
-            .lock()?
+        let started = Instant::now();
+        let handle = self.active_handle(session_id)?;
+        let mut inner = self.lock()?;
+        let connection = loop {
+            if handle.canceled.load(Ordering::SeqCst) || !inner.active.contains_key(session_id) {
+                return Err(closed());
+            }
+            let remaining = self.timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(operation_not_started());
+            }
+            match handle.connection.try_lock() {
+                Ok(connection) => break connection,
+                Err(TryLockError::Poisoned(_)) => return Err(unavailable()),
+                Err(TryLockError::WouldBlock) => {
+                    inner = self
+                        .expiration
+                        .wait_timeout(inner, remaining)
+                        .map_err(|_| unavailable())?
+                        .0;
+                }
+            }
+        };
+        drop(inner);
+        self.run_operation(session_id, &handle, connection, started, operation)
+    }
+
+    fn active_handle(&self, session_id: &str) -> Result<Handle, CoreError> {
+        self.lock()?
             .active
             .get(session_id)
             .map(|active| active.handle.clone())
-            .ok_or_else(closed)?;
-        let result = {
-            let connection = handle.connection.lock().map_err(|_| unavailable())?;
+            .ok_or_else(closed)
+    }
+
+    fn run_operation<T>(
+        &self,
+        session_id: &str,
+        handle: &Handle,
+        connection: MutexGuard<'_, SftpConnection>,
+        started: Instant,
+        operation: impl FnOnce(&SftpConnection) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        {
+            let mut inner = self.lock()?;
+            let active = inner
+                .active
+                .get_mut(session_id)
+                .filter(|active| Arc::ptr_eq(&active.handle.canceled, &handle.canceled))
+                .ok_or_else(closed)?;
             if handle.canceled.load(Ordering::SeqCst) {
                 return Err(closed());
             }
-            operation(&connection)
-        };
-        if handle.canceled.load(Ordering::SeqCst) {
-            return Err(closed());
+            if started.elapsed() >= self.timeout {
+                drop(connection);
+                self.expiration.notify_all();
+                return Err(operation_not_started());
+            }
+            active.operation_started = Some(started);
+            self.expiration.notify_all();
         }
-        if result
-            .as_ref()
-            .is_err_and(|error| error.code == "connection_lost")
-        {
+        let result = operation(&connection);
+        let result = if started.elapsed() >= self.timeout {
             self.disconnect(session_id)?;
+            Err(connection_lost())
+        } else if handle.canceled.load(Ordering::SeqCst) {
+            Err(closed())
+        } else {
+            if result
+                .as_ref()
+                .is_err_and(|error| error.code == "connection_lost")
+            {
+                self.disconnect(session_id)?;
+            }
+            result
+        };
+        {
+            let mut inner = self.lock()?;
+            if let Some(active) = inner
+                .active
+                .get_mut(session_id)
+                .filter(|active| Arc::ptr_eq(&active.handle.canceled, &handle.canceled))
+            {
+                active.operation_started = None;
+            }
+            // Publish completion and unlock together so queued requests cannot miss the wake-up.
+            drop(connection);
+            self.expiration.notify_all();
         }
         result
     }
@@ -547,7 +639,7 @@ impl ConnectionManager {
             && let Some(pending) = inner.pending.take()
         {
             close_pending(pending);
-            self.expiration.notify_one();
+            self.expiration.notify_all();
         }
         inner.active.retain(|_, active| {
             if active.attempt_id == attempt_id {
@@ -557,6 +649,7 @@ impl ConnectionManager {
                 true
             }
         });
+        self.expiration.notify_all();
         Ok(())
     }
 
@@ -565,6 +658,7 @@ impl ConnectionManager {
         if let Some(active) = inner.active.remove(session_id) {
             active.handle.close();
         }
+        self.expiration.notify_all();
         Ok(())
     }
 
@@ -577,7 +671,7 @@ impl ConnectionManager {
             && let Some(pending) = inner.pending.take()
         {
             close_pending(pending);
-            self.expiration.notify_one();
+            self.expiration.notify_all();
         }
         inner.active.retain(|_, active| {
             if active.profile.id == profile_id {
@@ -587,6 +681,7 @@ impl ConnectionManager {
                 true
             }
         });
+        self.expiration.notify_all();
         Ok(())
     }
 
@@ -599,7 +694,7 @@ impl ConnectionManager {
         for (_, active) in inner.active.drain() {
             active.handle.close();
         }
-        self.expiration.notify_one();
+        self.expiration.notify_all();
     }
 
     pub fn credential_storage_supported(&self) -> bool {
@@ -616,7 +711,7 @@ impl ConnectionManager {
                 && let Some(pending) = inner.pending.take()
             {
                 close_pending(pending);
-                self.expiration.notify_one();
+                self.expiration.notify_all();
             }
         }
         let account = credential_account(profile);
@@ -674,22 +769,51 @@ impl ConnectionManager {
     }
 }
 
-fn expire_attempts(inner: Arc<Mutex<Inner>>, expiration: Arc<Condvar>, lifetime: Duration) {
+fn expire_connections(
+    inner: Arc<Mutex<Inner>>,
+    expiration: Arc<Condvar>,
+    lifetime: Duration,
+    operation_timeout: Duration,
+) {
     let Ok(mut state) = inner.lock() else { return };
     loop {
         if state.stopped {
             return;
         }
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.created.elapsed() >= lifetime)
+            && let Some(pending) = state.pending.take()
+        {
+            close_pending(pending);
+        }
+        let active_before = state.active.len();
+        state.active.retain(|_, active| {
+            if active
+                .operation_started
+                .is_some_and(|started| started.elapsed() >= operation_timeout)
+            {
+                active.handle.close();
+                false
+            } else {
+                true
+            }
+        });
+        if state.active.len() != active_before {
+            expiration.notify_all();
+        }
         let remaining = state
             .pending
             .as_ref()
-            .map(|pending| lifetime.saturating_sub(pending.created.elapsed()));
-        if remaining.is_some_and(|duration| duration.is_zero()) {
-            if let Some(pending) = state.pending.take() {
-                close_pending(pending);
-            }
-            continue;
-        }
+            .map(|pending| lifetime.saturating_sub(pending.created.elapsed()))
+            .into_iter()
+            .chain(state.active.values().filter_map(|active| {
+                active
+                    .operation_started
+                    .map(|started| operation_timeout.saturating_sub(started.elapsed()))
+            }))
+            .min();
         let result = match remaining {
             Some(remaining) => expiration
                 .wait_timeout(state, remaining)
@@ -748,6 +872,12 @@ fn expired() -> CoreError {
 }
 fn closed() -> CoreError {
     CoreError::new("session_closed", "连接已关闭，请重新连接")
+}
+fn operation_not_started() -> CoreError {
+    CoreError::new(
+        "remote_file_busy",
+        "等待当前连接超时，操作尚未执行，请稍后重试",
+    )
 }
 fn unavailable() -> CoreError {
     CoreError::new("connection_unavailable", "连接状态不可用，请重新启动应用")

@@ -61,12 +61,35 @@ async def main():
     denied.chmod(0)
 
     class Filesystem(asyncssh.SFTPServer):
+        async def stat(self, path):
+            if (root / "slow-stats").exists():
+                (root / "stat-entered").write_text("ready", encoding="utf-8")
+                await asyncio.sleep(0.06)
+            if (root / "pause-stat").exists():
+                (root / "stat-entered").write_text("ready", encoding="utf-8")
+                while (root / "pause-stat").exists():
+                    await asyncio.sleep(0.01)
+            status = root / "stat-error"
+            if status.exists():
+                code = int(status.read_text())
+                raise asyncssh.SFTPError(code, "Injected stat error")
+            return super().stat(path)
+
         async def mkdir(self, path, attrs):
+            if (root / "pause-mutation-reply").exists():
+                with (root / "mutation-requests").open("a") as log:
+                    log.write("requested\n")
             if (root / "pause-mutation").exists():
                 (root / "mutation-entered").write_text("ready", encoding="utf-8")
                 while (root / "pause-mutation").exists():
                     await asyncio.sleep(0.01)
-            return super().mkdir(path, attrs)
+            result = super().mkdir(path, attrs)
+            if (root / "pause-mutation-reply").exists():
+                with (root / "mutation-replies").open("a") as log:
+                    log.write("executed\n")
+                while (root / "pause-mutation-reply").exists():
+                    await asyncio.sleep(0.01)
+            return result
 
         async def read(self, file_obj, offset, size):
             if (root / "slow-transfers").exists():

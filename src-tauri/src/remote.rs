@@ -142,6 +142,14 @@ pub async fn list_remote_directory(
 }
 
 #[tauri::command]
+pub async fn check_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), CoreError> {
+    run(&state, move |manager| manager.check_session(&session_id)).await
+}
+
+#[tauri::command]
 pub async fn disconnect_session(
     state: State<'_, AppState>,
     session_id: String,

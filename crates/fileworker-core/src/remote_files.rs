@@ -292,6 +292,10 @@ fn remote_error(error: ssh2::Error) -> CoreError {
     match error.code() {
         ErrorCode::SFTP(2 | 10) => failed("远程文件或目录不存在，请刷新目录"),
         ErrorCode::SFTP(3) => failed("没有操作此文件或目录的权限"),
+        ErrorCode::SFTP(6 | 7) => CoreError::new(
+            "connection_lost",
+            "服务器连接已中断或超时，请重新连接后刷新确认",
+        ),
         ErrorCode::SFTP(_) | ErrorCode::Session(-31) => {
             failed("操作未完成；请检查同名项、权限或目录是否为空，然后刷新确认")
         }
@@ -317,6 +321,22 @@ fn failed(message: impl Into<String>) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_status_errors_require_reconnection_not_file_operation_retry() {
+        for code in [6, 7] {
+            assert_eq!(
+                remote_error(ssh2::Error::from_errno(ErrorCode::SFTP(code))).code,
+                "connection_lost"
+            );
+        }
+        for code in [2, 3, 4, 10] {
+            assert_eq!(
+                remote_error(ssh2::Error::from_errno(ErrorCode::SFTP(code))).code,
+                "remote_file"
+            );
+        }
+    }
 
     #[test]
     fn utf8_text_is_bounded_and_active_formats_remain_plain_text() {

@@ -61,6 +61,21 @@ impl SftpConnection {
             .ok_or_else(|| CoreError::new("not_authenticated", "请先完成服务器认证"))
     }
 
+    pub(crate) fn check_health(&self) -> Result<(), CoreError> {
+        match self.filesystem()?.stat(Path::new(".")) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let error = directory_error(error);
+                // A permission or path error still proves that the peer answered.
+                if error.code == "connection_lost" {
+                    Err(error)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
     pub fn probe(
         profile: ConnectionProfile,
         timeout: Duration,
@@ -318,6 +333,7 @@ fn directory_error(error: ssh2::Error) -> CoreError {
     match error.code() {
         ErrorCode::SFTP(2 | 10) => CoreError::new("remote_directory", "远程目录不存在，请检查路径"),
         ErrorCode::SFTP(3) => CoreError::new("remote_directory", "没有读取此远程目录的权限"),
+        ErrorCode::SFTP(6 | 7) => connection_lost(),
         ErrorCode::SFTP(_) | ErrorCode::Session(-31) => {
             CoreError::new("remote_directory", "无法读取远程目录，请确认路径及权限")
         }
@@ -325,10 +341,31 @@ fn directory_error(error: ssh2::Error) -> CoreError {
     }
 }
 
-fn connection_lost() -> CoreError {
+pub(crate) fn connection_lost() -> CoreError {
     CoreError::new("connection_lost", "服务器连接已中断或超时，请重新连接")
 }
 
 fn invalid_private_key() -> CoreError {
     CoreError::new("invalid_private_key", "粘贴的私钥内容格式无效，请重新粘贴")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_status_errors_are_not_reported_as_directory_permissions() {
+        for code in [6, 7] {
+            assert_eq!(
+                directory_error(ssh2::Error::from_errno(ErrorCode::SFTP(code))).code,
+                "connection_lost"
+            );
+        }
+        for code in [2, 3, 4, 10] {
+            assert_eq!(
+                directory_error(ssh2::Error::from_errno(ErrorCode::SFTP(code))).code,
+                "remote_directory"
+            );
+        }
+    }
 }

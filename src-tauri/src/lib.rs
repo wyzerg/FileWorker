@@ -63,6 +63,7 @@ pub fn run() {
             remote::remote_file_properties,
             remote::preview_remote_file,
             remote::mutate_remote_file,
+            remote::check_session,
             remote::disconnect_session,
             remote::forget_credential,
             transfers::enqueue_transfers,
