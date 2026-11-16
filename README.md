@@ -30,6 +30,9 @@ macOS Apple Silicon 实验性预发布；
 `v0.1.0-preview.10` 已发布连接失效检测与整次操作超时修复，掉线会清除对应绿灯和等待状态，
 不影响其他连接、不自动重连或重放修改。公开附件回读、校验与解压签名检查通过，
 详见[preview.10 发布说明](docs/releases/v0.1.0-preview.10.md)。
+`v0.1.0-preview.11` 已发布 macOS 双栏拖动修复、队列最新置顶与单条记录移除、可调侧栏。
+同一 ZIP 解压应用完成隔离原生上传下载验收，公开附件回读、校验与解压签名检查通过，
+详见[preview.11 发布说明](docs/releases/v0.1.0-preview.11.md)。
 Windows、Linux 桌面和 Intel Mac 尚未验收。
 开发版 `.app` 未进行 Developer ID 签名与公证，不应当作正式发行版分发。
 
@@ -40,7 +43,7 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 
 ## macOS 预发布安装
 
-当前推荐 `v0.1.0-preview.10` 的 macOS Apple Silicon `.app.zip`，以及同名
+当前推荐 `v0.1.0-preview.11` 的 macOS Apple Silicon `.app.zip`，以及同名
 `.sha256` 文件。旧 `preview.1`、`preview.2` 缺少完整应用资源签名，浏览器下载后
 可能显示“已损坏”；保留历史产物，但不再推荐安装。
 
@@ -50,7 +53,7 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 1. 从本仓库 GitHub Releases 下载 ZIP 与校验文件，在下载目录执行：
 
    ```bash
-   shasum -a 256 -c FileWorker-v0.1.0-preview.10-macos-arm64.app.zip.sha256
+   shasum -a 256 -c FileWorker-v0.1.0-preview.11-macos-arm64.app.zip.sha256
    ```
 
 2. 校验成功后解压，将新包中的 `FileWorker.app` 放到应用程序目录。
@@ -73,6 +76,11 @@ Windows、Linux 桌面和 Intel Mac 尚未验收。
 从 `preview.9` 升级不改变凭据和配置格式，无需重新记住密码。
 程序下载和解压不代替浏览器首次启动、Finder 或安装升级验收，本轮没有重做这些原生验收。
 真实隔夜放置和系统睡眠/唤醒仍待现场验收，不能用模拟事件替代。
+`preview.11` 的两项公开附件同样已无认证回读，与本地产物逐字节一致；
+归档、SHA-256、解压签名、标识、基础版本和架构检查通过。
+发布 ZIP 解压副本已原生复验多选拖动上传、反向下载和侧栏操作；
+不代替浏览器首次启动、Gatekeeper 或安装升级验收。
+从 `preview.10` 升级无需迁移配置或重新记住凭据，旧版附件保持不变。
 
 ## 平台边界
 
@@ -510,7 +518,7 @@ macOS Apple Silicon 免费预发布构建与打包：
 ```bash
 bash scripts/run.sh tauri build --bundles app --ci -- --locked
 bash scripts/run.sh test:preview
-bash scripts/run.sh preview:package v0.1.0-preview.10
+bash scripts/run.sh preview:package v0.1.0-preview.11
 ```
 
 `bundle.macOS.signingIdentity` 为 `"-"`，由 Tauri 对可执行文件和完整 `.app`
@@ -548,6 +556,9 @@ C AddressSanitizer 需实际对 C 依赖加
 队列单条移除通过 Rust 与界面回归，真实工作线程取消、临时文件清理及源/目标文件保留
 通过隔离协议；本轮未在原生 GUI 点击移除按钮，也未重跑真实 Finder 或首次安装验收。
 详见[工作区交互验收](docs/acceptance/2026-11-16-workspace-interactions.md)。
+`preview.11` 标签指向 `2d5a5ac`，Release `446676952` 已公开并完成附件回读与解压签名检查。
+本轮测试环境、样本、截图报告、下载、解压副本和临时发布文件已清理；
+保留正式发布包与编译缓存，用户安装程序和原有预览服务不变。
 
 2026-11-11 连接失效检测重新通过 `273` 项前端（默认及随机顺序 seed `72611`）、
 `37` 项 Playwright、`146` 项核心 Rust（含 `61` 项协议/夹具回归和 `21` 项本地存储测试）、
