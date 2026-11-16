@@ -48,7 +48,70 @@ const job: TransferJob = {
   error: null, warning: null,
 };
 const actions = () => ({
-  onCancel: vi.fn(), onRetry: vi.fn(), onResolve: vi.fn(), onConcurrency: vi.fn(), onClear: vi.fn(),
+  onCancel: vi.fn(), onRetry: vi.fn(), onRemove: vi.fn(), onResolve: vi.fn(), onConcurrency: vi.fn(), onClear: vi.fn(),
+});
+
+it("按入队顺序倒序展示，过滤与重试不改原始快照或任务位置", () => {
+  const callbacks = actions();
+  const jobs = [
+    { ...job, id: "old-completed", name: "old.txt", state: "completed" as const },
+    { ...job, id: "waiting", name: "waiting.txt", state: "queued" as const },
+    { ...job, id: "new-completed", name: "new.txt", state: "completed" as const },
+    { ...job, id: "running", name: "running.txt" },
+    { ...job, id: "failed", name: "failed.txt", state: "failed" as const },
+  ];
+  for (const item of jobs) Object.freeze(item);
+  Object.freeze(jobs);
+  const snapshot = Object.freeze({ revision: 1, concurrency: 3, jobs });
+  const { rerender } = render(<TransferQueue snapshot={snapshot} sessionId="session" {...callbacks} />);
+  const visible = () => screen.getAllByRole("progressbar").map((item) => item.getAttribute("aria-label"));
+  expect(visible()).toEqual([
+    "failed.txt 传输进度", "running.txt 传输进度", "new.txt 传输进度", "waiting.txt 传输进度", "old.txt 传输进度",
+  ]);
+  fireEvent.click(screen.getByRole("tab", { name: /传输中/ }));
+  expect(visible()).toEqual(["running.txt 传输进度", "waiting.txt 传输进度"]);
+  fireEvent.click(screen.getByRole("tab", { name: /已完成/ }));
+  expect(visible()).toEqual(["new.txt 传输进度", "old.txt 传输进度"]);
+  fireEvent.click(screen.getByRole("tab", { name: /全部/ }));
+  expect(visible()[0]).toBe("failed.txt 传输进度");
+  const retried = jobs.map((item) => item.id === "waiting" ? { ...item, state: "queued" as const, attempt: 2 } : item);
+  rerender(<TransferQueue snapshot={{ revision: 2, concurrency: 3, jobs: retried }} sessionId="session" {...callbacks} />);
+  expect(visible()).toEqual([
+    "failed.txt 传输进度", "running.txt 传输进度", "new.txt 传输进度", "waiting.txt 传输进度", "old.txt 传输进度",
+  ]);
+  expect(snapshot.jobs.map((item) => item.id)).toEqual(["old-completed", "waiting", "new-completed", "running", "failed"]);
+  expect(snapshot.jobs[1].attempt).toBe(1);
+});
+
+it.each(["completed", "failed", "canceled", "skipped"] as const)("%s 记录断开后仍可单条移除，保留原有重试及批量清理", (state) => {
+  const callbacks = actions();
+  render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: [{ ...job, state }] }} sessionId={null} {...callbacks} />);
+  const remove = screen.getByRole("button", { name: "移除 a.txt 的传输记录" });
+  expect(remove).toBeEnabled();
+  expect(remove).toHaveAttribute("title", "移除 a.txt 的传输记录");
+  if (state === "failed" || state === "canceled") expect(screen.getByRole("button", { name: "重试 a.txt" })).toBeDisabled();
+  fireEvent.click(remove);
+  expect(callbacks.onRemove).toHaveBeenCalledExactlyOnceWith("job-1");
+  expect(callbacks.onRetry).not.toHaveBeenCalled();
+  expect(callbacks.onCancel).not.toHaveBeenCalled();
+  expect(callbacks.onClear).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "清理已结束任务" }));
+  expect(callbacks.onClear).toHaveBeenCalledTimes(1);
+});
+
+it.each(["queued", "running", "canceling", "conflict"] as const)("%s 活动任务只能取消或处理，不能移除记录", (state) => {
+  const callbacks = actions();
+  render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: [{ ...job, state }] }} sessionId="session" dialogBlocked {...callbacks} />);
+  expect(screen.queryByRole("button", { name: "移除 a.txt 的传输记录" })).not.toBeInTheDocument();
+  const cancel = screen.getByRole("button", { name: "取消 a.txt" });
+  if (state === "canceling") expect(cancel).toBeDisabled();
+  else {
+    fireEvent.click(cancel);
+    expect(callbacks.onCancel).toHaveBeenCalledExactlyOnceWith("job-1");
+  }
+  if (state === "conflict") expect(screen.getByRole("button", { name: "处理 a.txt 的同名文件" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "清理已结束任务" })).toBeDisabled();
+  expect(callbacks.onRemove).not.toHaveBeenCalled();
 });
 
 it("队列使用真实字节进度，显示错误、冲突和可用操作", async () => {
@@ -61,6 +124,8 @@ it("队列使用真实字节进度，显示错误、冲突和可用操作", asyn
   expect(screen.getByText("磁盘空间不足")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "重试 a.txt" }));
   expect(callbacks.onRetry).toHaveBeenCalledWith("job-1");
+  fireEvent.click(screen.getByRole("button", { name: "移除 a.txt 的传输记录" }));
+  expect(callbacks.onRemove).toHaveBeenCalledWith("job-1");
   rerender(<TransferQueue snapshot={{ revision: 3, concurrency: 3, jobs: [{ ...job, state: "conflict" }] }} sessionId="session" {...callbacks} />);
   const dialog = within(screen.getByRole("dialog", { name: "同名文件" }));
   fireEvent.click(dialog.getByRole("button", { name: "保留两份" }));
@@ -101,6 +166,8 @@ it("多个同名逐个提示，等待提交结果且旧快照不会重复弹出�
   let finish!: () => void;
   const callbacks = { ...actions(), onResolve: vi.fn(() => new Promise<void>((resolve) => { finish = resolve; })) };
   const { rerender } = render(<TransferQueue snapshot={{ revision: 1, concurrency: 3, jobs: conflicts }} sessionId="session" {...callbacks} />);
+  expect(screen.getAllByRole("progressbar").map((item) => item.getAttribute("aria-label")))
+    .toEqual(["b.txt 传输进度", "a.txt 传输进度"]);
   const dialog = screen.getByRole("dialog", { name: "同名文件" });
   fireEvent.click(within(dialog).getByRole("button", { name: "保留两份" }));
   fireEvent.click(within(dialog).getByRole("button", { name: "保留两份" }));

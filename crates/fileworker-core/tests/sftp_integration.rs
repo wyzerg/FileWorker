@@ -1585,6 +1585,70 @@ fn conflicts_never_silently_overwrite_and_support_skip_replace_and_keep_both() {
 
 #[test]
 #[ignore = "requires isolated asyncssh fixture"]
+fn removing_an_older_record_preserves_a_running_worker_and_its_cleanup() {
+    let fixture = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let server = Server::start(fixture.path(), 0, "host");
+    let (remote, session) = connected_manager(fixture.path(), config.path(), &server);
+    let queue = TransferManager::new(remote);
+    queue.set_concurrency(1).unwrap();
+    let older = local.path().join("older.txt");
+    fs::write(&older, b"keep original").unwrap();
+    let old_jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            older.to_str().unwrap(),
+            "/",
+            true,
+        )])
+        .unwrap();
+    wait_for_job(&queue, &old_jobs[0], TransferState::Completed);
+    fs::write(fixture.path().join("slow-transfers"), b"enabled").unwrap();
+    let large = local.path().join("running.bin");
+    fs::write(&large, vec![71; 4 * 1024 * 1024]).unwrap();
+    let jobs = queue
+        .enqueue(vec![transfer_request(
+            &session,
+            large.to_str().unwrap(),
+            "/",
+            true,
+        )])
+        .unwrap();
+    assert!(wait_until(
+        || queue.snapshot().unwrap().jobs[1].transferred_bytes > 0,
+        Duration::from_secs(5)
+    ));
+    assert_eq!(
+        queue.remove_finished(&jobs[0]).unwrap_err().code,
+        "invalid_transfer_state"
+    );
+    queue.remove_finished(&old_jobs[0]).unwrap();
+    let snapshot = queue.snapshot().unwrap();
+    assert_eq!(snapshot.jobs.len(), 1);
+    assert_eq!(snapshot.jobs[0].id, jobs[0]);
+    assert_eq!(snapshot.jobs[0].state, TransferState::Running);
+    queue.cancel(&jobs[0]).unwrap();
+    wait_for_job(&queue, &jobs[0], TransferState::Canceled);
+    assert!(!fixture.path().join("files/running.bin").exists());
+    assert!(
+        !fs::read_dir(fixture.path().join("files"))
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".fileworker-"))
+    );
+    queue.remove_finished(&jobs[0]).unwrap();
+    assert!(queue.snapshot().unwrap().jobs.is_empty());
+    assert_eq!(fs::read(&older).unwrap(), b"keep original");
+    assert_eq!(
+        fs::read(fixture.path().join("files/older.txt")).unwrap(),
+        b"keep original"
+    );
+    assert_eq!(fs::metadata(&large).unwrap().len(), 4 * 1024 * 1024);
+}
+
+#[test]
+#[ignore = "requires isolated asyncssh fixture"]
 fn cancel_cleans_partial_files_and_leaves_browsing_and_other_jobs_usable() {
     let fixture = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();

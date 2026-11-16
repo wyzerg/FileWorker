@@ -132,6 +132,8 @@ export const api = {
     desktopCommand("set_transfer_concurrency", { concurrency }),
   clearFinishedTransfers: (): Promise<void> =>
     desktopCommand("clear_finished_transfers", {}),
+  removeFinishedTransfer: (id: string): Promise<void> =>
+    desktopCommand("remove_finished_transfer", { id }),
   probeConnection: (profileId: string, attemptId: string): Promise<HostProbe> =>
     desktopCommand("probe_connection", { profileId, attemptId }),
   trustConnection: (attemptId: string): Promise<void> =>

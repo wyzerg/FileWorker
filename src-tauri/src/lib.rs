@@ -73,6 +73,7 @@ pub fn run() {
             transfers::resolve_transfer_conflict,
             transfers::set_transfer_concurrency,
             transfers::clear_finished_transfers,
+            transfers::remove_finished_transfer,
             finder_drop::enqueue_finder_upload,
         ])
         .build(tauri::generate_context!())

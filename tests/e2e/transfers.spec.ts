@@ -45,7 +45,15 @@ async function installTransferFixture(page: Page, conflictCount = 1) {
             case "retry_transfer": findJob().state = "failed"; findJob().error = "磁盘空间不足，请释放空间后重试"; revision += 1; return;
             case "resolve_transfer_conflict": findJob().state = "completed"; findJob().transferredBytes = 1048576; revision += 1; return;
             case "set_transfer_concurrency": concurrency = Number(args.concurrency); revision += 1; return;
-            case "clear_finished_transfers": jobs = []; revision += 1; return;
+            case "clear_finished_transfers":
+              jobs = jobs.filter((job) => !["completed", "failed", "canceled", "skipped"].includes(String(job.state)));
+              revision += 1; return;
+            case "remove_finished_transfer":
+              if (!findJob() || !["completed", "failed", "canceled", "skipped"].includes(String(findJob().state))) {
+                throw new Error("只有已结束的传输可以移除");
+              }
+              jobs = jobs.filter((job) => job.id !== args.id);
+              revision += 1; return;
             case "cancel_connection":
             case "check_session":
             case "disconnect_session":
@@ -154,3 +162,41 @@ test("编辑连接期间新冲突等待现有弹窗关闭后提示", async ({ pa
   await expect(page.getByRole("dialog")).toHaveCount(1);
   await expect(page.getByRole("button", { name: "关闭对话框" })).toBeFocused();
 });
+
+for (const theme of ["dark", "light"] as const) {
+  test(`${theme} 新任务置顶，单条移除不影响其他任务，失败记录操作不溢出`, async ({ page }) => {
+    await installTransferFixture(page, 0);
+    await page.emulateMedia({ colorScheme: theme });
+    for (const width of [1280, 800, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await page.goto("/");
+      if (width < 760) await page.getByRole("tab", { name: "远程", exact: true }).click();
+      await page.getByRole("button", { name: "连接服务器", exact: true }).click();
+      await page.getByLabel("密码", { exact: true }).fill("isolated-test");
+      await page.getByRole("dialog").getByRole("button", { name: "连接", exact: true }).click();
+      if (width < 760) await page.getByRole("tab", { name: "本地", exact: true }).click();
+      await page.getByLabel("选择全部本地文件").check();
+      await page.getByRole("button", { name: "上传所选文件" }).click();
+      const rows = page.locator(".transfer-row");
+      await expect(rows).toHaveCount(2);
+      await expect(rows.locator(".transfer-file > strong")).toHaveText(["很长的传输文件名称用于验证任务队列不会溢出.bin", "报告.csv"]);
+      await expect(page.getByRole("button", { name: /移除 .+ 的传输记录/ })).toHaveCount(0);
+      await page.getByRole("button", { name: "取消 报告.csv", exact: true }).click();
+      await page.getByRole("button", { name: "重试 报告.csv", exact: true }).click();
+      const failed = page.getByRole("region", { name: "传输队列" }).getByLabel("报告.csv · 失败", { exact: true });
+      await expect(failed.getByRole("button", { name: "重试 报告.csv" })).toBeVisible();
+      await expect(failed.getByRole("button", { name: "移除 报告.csv 的传输记录" })).toBeVisible();
+      for (const row of await rows.all()) {
+        expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      }
+      await page.screenshot({ path: `test-results/queue-remove-${theme}-${width}.png` });
+      await page.getByRole("button", { name: "移除 报告.csv 的传输记录" }).click();
+      await expect(rows).toHaveCount(1);
+      await expect(rows.locator(".transfer-file > strong")).toHaveText("很长的传输文件名称用于验证任务队列不会溢出.bin");
+      await expect(page.getByRole("button", { name: "取消 很长的传输文件名称用于验证任务队列不会溢出.bin" })).toBeVisible();
+      await page.getByRole("tab", { name: /^传输中/ }).click();
+      await expect(rows).toHaveCount(1);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+    }
+  });
+}

@@ -72,5 +72,6 @@ export function useTransfers(onComplete: (job: TransferJob) => void, onNotice: (
     },
     concurrency: (value: number) => operate(() => api.setTransferConcurrency(value)),
     clear: () => operate(() => api.clearFinishedTransfers()),
+    remove: (id: string) => operate(() => api.removeFinishedTransfer(id)),
   };
 }

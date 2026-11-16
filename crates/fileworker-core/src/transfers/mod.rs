@@ -1,4 +1,6 @@
 mod file_ops;
+#[cfg(test)]
+mod tests;
 
 use crate::{connections::ConnectionManager, error::CoreError, remote_files::RemoteFileAction};
 use serde::{Deserialize, Serialize};
@@ -354,6 +356,24 @@ impl TransferManager {
     pub fn clear_finished(&self) -> Result<(), CoreError> {
         let mut state = self.lock()?;
         state.jobs.retain(|record| !record.job.state.is_finished());
+        state.revision += 1;
+        Ok(())
+    }
+
+    pub fn remove_finished(&self, id: &str) -> Result<(), CoreError> {
+        let mut state = self.lock()?;
+        let index = state
+            .jobs
+            .iter()
+            .position(|record| record.job.id == id)
+            .ok_or_else(|| CoreError::new("transfer_missing", "此传输任务已不存在"))?;
+        if !state.jobs[index].job.state.is_finished() {
+            return Err(CoreError::new(
+                "invalid_transfer_state",
+                "此任务尚未结束，不能移除传输记录",
+            ));
+        }
+        state.jobs.remove(index);
         state.revision += 1;
         Ok(())
     }

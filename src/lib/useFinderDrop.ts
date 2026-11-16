@@ -80,12 +80,14 @@ export function useFinderDrop(options: {
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") clear(); };
     window.addEventListener("keydown", escape);
     window.addEventListener("dragstart", clear);
+    window.addEventListener("pointerdown", clear);
     return () => {
       active = false;
       unlisten?.();
       pending.current = null;
       window.removeEventListener("keydown", escape);
       window.removeEventListener("dragstart", clear);
+      window.removeEventListener("pointerdown", clear);
     };
   }, [available, clear]);
   return { dropRef, target };

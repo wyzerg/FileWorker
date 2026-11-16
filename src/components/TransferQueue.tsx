@@ -48,7 +48,7 @@ function TransferConflictDialog({ job, sessionName, onResolve, onResolved, onClo
   </Dialog>;
 }
 
-export function TransferQueue({ snapshot, sessionId, sessionIds, sessionNames, dialogBlocked = false, onCancel, onRetry, onResolve, onConcurrency, onClear }: {
+export function TransferQueue({ snapshot, sessionId, sessionIds, sessionNames, dialogBlocked = false, onCancel, onRetry, onRemove, onResolve, onConcurrency, onClear }: {
   snapshot: TransferSnapshot;
   sessionId: string | null;
   sessionIds?: readonly string[];
@@ -56,6 +56,7 @@ export function TransferQueue({ snapshot, sessionId, sessionIds, sessionNames, d
   dialogBlocked?: boolean;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
+  onRemove: (id: string) => void;
   onResolve: ResolveConflict;
   onConcurrency: (value: number) => void;
   onClear: () => void;
@@ -91,7 +92,8 @@ export function TransferQueue({ snapshot, sessionId, sessionIds, sessionNames, d
     传输中: snapshot.jobs.filter(unfinished),
     已完成: snapshot.jobs.filter((job) => job.state === "completed"),
   };
-  const jobs = filters[tab as keyof typeof filters];
+  // Reverse visible rows only; conflict prompts keep their original enqueue order.
+  const jobs = filters[tab as keyof typeof filters].slice().reverse();
   return <section className={`transfer-queue ${expanded ? "" : "collapsed"}`} aria-label="传输队列">
     <header className="queue-heading">
       <span className="queue-title"><ArrowDownToLine size={16} /><h2>传输队列</h2></span>
@@ -140,6 +142,7 @@ export function TransferQueue({ snapshot, sessionId, sessionIds, sessionNames, d
           {["failed", "canceled"].includes(job.state) && <IconButton label={`重试 ${job.name}`} disabled={!live(job.sessionId)}
             onClick={() => onRetry(job.id)}><RefreshCw size={15} /></IconButton>}
           {unfinished(job) && <IconButton label={`取消 ${job.name}`} disabled={job.state === "canceling"} onClick={() => onCancel(job.id)}><X size={15} /></IconButton>}
+          {!unfinished(job) && <IconButton label={`移除 ${job.name} 的传输记录`} onClick={() => onRemove(job.id)}><Trash2 size={15} /></IconButton>}
         </div>
       </div>)}
     </div> : <div className="queue-empty"><Inbox size={25} strokeWidth={1.3} /><span>{tab === "全部" ? "暂无传输任务" : "暂无此类任务"}</span></div>)}

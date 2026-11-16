@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
-async function installDesktopFixture(page: Page) {
-  await page.addInitScript(() => {
+async function installDesktopFixture(page: Page, pointerMode = false) {
+  await page.addInitScript((pointerMode) => {
     const profile = {
       id: "e6814610-8703-4c50-ab27-e823c8577fc3", name: "拖放验收",
       host: "test.example.invalid", port: 22, username: "tester", authMethod: "password",
@@ -17,11 +17,14 @@ async function installDesktopFixture(page: Page) {
     const jobs: Array<Record<string, unknown>> = [];
     Object.assign(window, {
       isTauri: true,
+      __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: () => {} },
       __TAURI_INTERNALS__: {
         metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
+        transformCallback: () => 1,
         invoke: async (command: string, args: Record<string, unknown>) => {
           switch (command) {
-            case "get_environment": return { homePath: "/local", runtime: "desktop", shortcuts: [] };
+            case "get_environment": return { homePath: "/local", runtime: "desktop", shortcuts: [], finderDrop: pointerMode };
+            case "plugin:event|listen": return 1;
             case "list_profiles": return [profile];
             case "list_groups": return [];
             case "credential_status": return { available: false, supported: true };
@@ -45,21 +48,23 @@ async function installDesktopFixture(page: Page) {
             case "cancel_connection":
             case "check_session":
             case "disconnect_session":
+            case "plugin:event|unlisten":
             case "plugin:window|set_theme": return;
             default: throw new Error(`未配置命令：${command}`);
           }
         },
       },
     });
-  });
+  }, pointerMode);
 }
 
+for (const pointerMode of [false, true]) {
 for (const theme of ["dark", "light"] as const) {
   for (const width of [1280, 800]) {
-    test(`${theme} ${width} 双栏实际鼠标拖放上传下载，目标为当前目录`, async ({ page }) => {
+    test(`${pointerMode ? "指针" : "HTML5"} ${theme} ${width} 双栏实际鼠标拖放上传下载，目标为当前目录`, async ({ page }) => {
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
-      await installDesktopFixture(page);
+      await installDesktopFixture(page, pointerMode);
       await page.setViewportSize({ width, height: 820 });
       await page.emulateMedia({ colorScheme: theme });
       await page.goto("/");
@@ -70,7 +75,7 @@ for (const theme of ["dark", "light"] as const) {
       const remotePane = page.getByRole("region", { name: "远程文件", exact: true });
       const source = localPane.getByRole("row").filter({ hasText: "报告.csv" });
       const destination = remotePane.getByRole("row").filter({ hasText: "远程子目录" });
-      await expect(source).toHaveAttribute("draggable", "true");
+      await expect(source).toHaveAttribute("draggable", String(!pointerMode));
       await page.getByLabel("选择全部本地文件").check();
       const from = (await source.boundingBox())!;
       const to = (await destination.boundingBox())!;
@@ -81,7 +86,7 @@ for (const theme of ["dark", "light"] as const) {
       await page.mouse.move(to.x + 70, to.y + to.height / 2, { steps: 8 });
       await expect(remotePane).toHaveClass(/file-pane--drop-target/u);
       expect(await destination.boundingBox()).toEqual(destinationBefore);
-      await page.screenshot({ path: `test-results/${theme}-drag-${width}.png` });
+      await page.screenshot({ path: `test-results/${pointerMode ? "pointer" : "html"}-${theme}-drag-${width}.png` });
       await page.mouse.up();
       const queue = page.getByRole("region", { name: "传输队列" });
       await expect(queue.locator(".transfer-row")).toHaveCount(2);
@@ -92,12 +97,13 @@ for (const theme of ["dark", "light"] as const) {
         .dragTo(localPane.locator(".file-list-container"), { targetPosition: { x: 80, y: 160 } });
       await expect(queue.locator(".transfer-row")).toHaveCount(3);
       await expect(queue.locator(".transfer-direction.download")).toHaveCount(1);
-      await expect(queue.locator(".transfer-file > span").last()).toHaveText("拖放验收 · /local");
+      await expect(queue.locator(".transfer-file > span").first()).toHaveText("拖放验收 · /local");
       await expect(page.getByLabel("选择 本地子目录")).toBeDisabled();
       expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
       expect(errors).toEqual([]);
     });
   }
+}
 }
 
 test("窄视口保留按钮传输，浏览器预览拒绝外部文件放下", async ({ page }) => {

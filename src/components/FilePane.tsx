@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpFromLine, ChevronRight, Eye, EyeOff, File, FileArchive, FileCode2, FileImage, FileText, Folder, FolderOpen, HardDrive, Link2, LoaderCircle, Monitor, Pencil, PlugZap, Plus, RefreshCw, Search, Server, Unplug, Wrench } from "lucide-react";
 import type { ConnectionProfile, DirectoryListing, FileAction, FileEntry, SortDirection, SortKey } from "../lib/types";
 import { formatBytes, formatDate, isOrdinaryFile, visibleEntries } from "../lib/files";
@@ -40,7 +40,7 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
   onTransfer?: (entries: FileEntry[]) => void;
   drag?: FilePaneDrag;
   externalDropTarget?: boolean;
-  dropRef?: Ref<HTMLDivElement>;
+  dropRef?: RefObject<HTMLDivElement | null>;
   onFileAction?: (action: FileAction, entries: FileEntry[]) => void;
   mutationsBlocked?: boolean;
   canGoBack?: boolean;
@@ -172,7 +172,10 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
             });
           }} />}
       </div>
-      <div className="file-list-container" ref={dropRef} aria-busy={loading || undefined}
+      <div className="file-list-container" ref={(element) => {
+        if (drag) drag.dropRef.current = element;
+        if (dropRef) dropRef.current = element;
+      }} aria-busy={loading || undefined}
         onContextMenu={(event) => {
           event.preventDefault(); event.stopPropagation();
           openMenu(event.clientX, event.clientY, undefined, event.currentTarget);
@@ -200,7 +203,19 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
           )}</tr></thead>
           <tbody>{entries.map((entry, index) => (
             <tr key={entry.path} className={selected.has(entry.path) ? "selected" : ""} aria-selected={selected.has(entry.path)}
-              draggable={canDrag(entry)}
+              draggable={canDrag(entry) && !drag?.pointerMode}
+              onPointerDown={(event) => {
+                if (!canDrag(entry) || event.target instanceof HTMLInputElement || event.shiftKey || event.metaKey || event.ctrlKey) return;
+                const targets = selected.has(entry.path) ? selectedEntries : [entry];
+                if (drag?.pointerStart(targets, event)) {
+                  event.preventDefault();
+                  event.currentTarget.focus();
+                  if (!selected.has(entry.path)) {
+                    anchor.current = entry.path;
+                    setSelected(new Set([entry.path]));
+                  }
+                }
+              }}
               onDragStart={(event) => {
                 if (!canDrag(entry)) {
                   event.preventDefault();
@@ -219,7 +234,7 @@ export function FilePane({ side, listing, path, parentPath, onPathChange, onNavi
               }}
               onDragEnd={drag?.end}
               tabIndex={selected.has(entry.path) || (!selectedEntries.length && index === 0) ? 0 : -1}
-              onClick={(event) => select(entry, event)} onDoubleClick={() => {
+              onClick={(event) => { if (!drag?.consumeClick()) select(entry, event); }} onDoubleClick={() => {
                 if (entry.isDir) onNavigate?.(entry.path);
                 else if (!local && !entry.isSymlink) onFileAction?.("preview", [entry]);
               }}

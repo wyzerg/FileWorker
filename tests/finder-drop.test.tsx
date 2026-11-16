@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../src/App";
 import type { DirectoryListing } from "../src/lib/types";
 
@@ -95,15 +95,87 @@ beforeEach(() => {
   fixture.remote.mockReset().mockResolvedValue(remote);
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
   Object.defineProperty(window, "innerHeight", { configurable: true, value: 820 });
+  vi.stubGlobal("PointerEvent", class extends MouseEvent {
+    pointerId: number;
+    isPrimary: boolean;
+    constructor(type: string, options: PointerEventInit = {}) {
+      super(type, options);
+      this.pointerId = options.pointerId ?? 1;
+      this.isPrimary = options.isPrimary ?? true;
+    }
+  });
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
     return this.matches(".file-pane--remote .file-list-container")
       ? new DOMRect(700, 200, 500, 400) : new DOMRect(0, 0, 600, 600);
   });
   Object.defineProperty(document, "elementFromPoint", {
     configurable: true,
-    value: (x: number, y: number) => !fixture.occluded && x >= 700 && x < 1200 && y >= 200 && y < 600
-      ? remotePane().querySelector(".file-list-container") : document.body,
+    value: (x: number, y: number) => {
+      if (fixture.occluded || y < 200 || y >= 600) return document.body;
+      if (x >= 700 && x < 1200) return remotePane().querySelector(".file-list-container");
+      if (x >= 0 && x < 600) return screen.getByRole("region", { name: "本地文件" }).querySelector(".file-list-container");
+      return document.body;
+    },
   });
+});
+afterEach(() => vi.unstubAllGlobals());
+
+function startInternal(name: string, x = 320) {
+  fireEvent.pointerDown(screen.getByText(name, { exact: true }).closest("tr")!, {
+    pointerId: 1, button: 0, isPrimary: true, clientX: x, clientY: 328,
+  });
+}
+
+it.each(["upload", "download"] as const)("macOS 内部 %s 使用指针拖动，只提交当前窗口来源一次", async (direction) => {
+  await workspace();
+  startInternal(direction === "upload" ? "local.txt" : "remote.txt", direction === "upload" ? 320 : 960);
+  const x = direction === "upload" ? 960 : 320;
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: x, clientY: 328 });
+  fireEvent.pointerUp(window, { pointerId: 1, clientX: x, clientY: 328 });
+  fireEvent.pointerUp(window, { pointerId: 1, clientX: x, clientY: 328 });
+  await waitFor(() => expect(fixture.enqueue).toHaveBeenCalledExactlyOnceWith([{
+    sessionId: "session-1", direction,
+    sourcePath: direction === "upload" ? "/local/local.txt" : "/remote/remote.txt",
+    destinationDir: direction === "upload" ? "/remote" : "/local",
+  }]));
+  expect(fixture.upload).not.toHaveBeenCalled();
+});
+
+it.each(["click", "cancel", "escape", "blur", "occluded", "same-pane", "outside", "refresh"] as const)(
+  "窗口内拖动后 %s 不能提交或重放", async (cause) => {
+    await workspace();
+    startInternal("local.txt");
+    if (cause !== "click") fireEvent.pointerMove(window, { pointerId: 1, clientX: 960, clientY: 328 });
+    if (cause === "cancel") fireEvent.pointerCancel(window, { pointerId: 1 });
+    if (cause === "escape") fireEvent.keyDown(window, { key: "Escape" });
+    if (cause === "blur") fireEvent.blur(window);
+    if (cause === "occluded") fixture.occluded = true;
+    if (cause === "refresh") {
+      fixture.local.mockResolvedValue({ ...local });
+      fireEvent.click(screen.getByRole("button", { name: "刷新本地目录" }));
+      await waitFor(() => expect(fixture.local).toHaveBeenCalledTimes(2));
+    }
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: cause === "same-pane" || cause === "click" ? 320 : 960, clientY: cause === "outside" ? 50 : 328 });
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 960, clientY: 328 });
+    expect(fixture.enqueue).not.toHaveBeenCalled();
+    expect(fixture.upload).not.toHaveBeenCalled();
+  },
+);
+
+it.each(["directory", "meta", "shift"] as const)("取消拖动后下一次 %s 点击仍可正常选择", async (kind) => {
+  const folder = { ...local.entries[0], name: "folder", path: "/local/folder", isDir: true };
+  fixture.local.mockResolvedValue({ ...local, entries: [folder, ...local.entries] });
+  await workspace();
+  startInternal("local.txt");
+  fireEvent.pointerMove(window, { pointerId: 1, clientX: 960, clientY: 328 });
+  fireEvent.pointerCancel(window, { pointerId: 1 });
+  const target = screen.getByText("folder", { exact: true }).closest("tr")!;
+  const modifiers = { metaKey: kind === "meta", shiftKey: kind === "shift" };
+  fireEvent.pointerDown(target, { pointerId: 1, button: 0, clientX: 320, clientY: 290, ...modifiers });
+  fireEvent.pointerUp(target, { pointerId: 1, clientX: 320, clientY: 290, ...modifiers });
+  fireEvent.click(target, modifiers);
+  expect(target).toHaveAttribute("aria-selected", "true");
+  expect(fixture.enqueue).not.toHaveBeenCalled();
 });
 
 it("Finder 进入和移动只高亮实际命中的远程文件列表", async () => {

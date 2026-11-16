@@ -35,7 +35,8 @@ function disabled(action: FileAction, { entries, ready, mutationsBlocked, downlo
 export function RemoteFileToolbar(options: ActionOptions & { menuOpen: boolean; onMenu: (trigger: HTMLButtonElement) => void }) {
   return <div className="file-actions remote-file-toolbar">
     {actions.map(({ id, label, Icon }) => <IconButton key={id} label={label} disabled={disabled(id, options)}
-      className={["copyPath", "rename", "properties"].includes(id) ? "toolbar-secondary" : ""}
+      className={["copyPath", "rename", "properties"].includes(id) ? "toolbar-secondary"
+        : ["preview", "createDirectory"].includes(id) ? "toolbar-narrow" : ""}
       onClick={() => options.onAction(id, options.entries)}><Icon size={16} /></IconButton>)}
     <IconButton label="更多文件操作" className="file-toolbar-overflow" disabled={!options.ready}
       aria-haspopup="menu" aria-expanded={options.menuOpen} onClick={(event) => options.onMenu(event.currentTarget)}>

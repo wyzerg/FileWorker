@@ -59,3 +59,11 @@ pub async fn set_transfer_concurrency(
 pub async fn clear_finished_transfers(state: State<'_, AppState>) -> Result<(), CoreError> {
     run(&state, |queue| queue.clear_finished()).await
 }
+
+#[tauri::command]
+pub async fn remove_finished_transfer(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), CoreError> {
+    run(&state, move |queue| queue.remove_finished(&id)).await
+}

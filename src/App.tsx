@@ -22,6 +22,7 @@ import { forgetRemoteLocation } from "./lib/remoteLocations";
 import { useRemoteFiles } from "./lib/useRemoteFiles";
 import { RemoteFileDialogs } from "./components/RemoteFileDialogs";
 import { StatusNotice } from "./components/StatusNotice";
+import { useSidebarResize } from "./lib/useSidebarResize";
 
 export default function App() {
   const [environment, setEnvironment] = useState<RuntimeEnvironment | null>(null);
@@ -43,6 +44,7 @@ export default function App() {
   const [profileMenu, setProfileMenu] = useState<{ profile: ConnectionProfile; anchor: { x: number; y: number }; trigger?: HTMLElement | null } | null>(null);
   const [connectionRequest, setConnectionRequest] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const sidebar = useSidebarResize(sidebarCollapsed, setNotice);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [activePane, setActivePane] = useState("local");
   const requestId = useRef(0);
@@ -120,7 +122,8 @@ export default function App() {
   const transferReady = isDesktop && Boolean(remote.session && remote.listing && listing)
     && !remote.loading && !loading && !transfers.submitting;
   const drag = useTransferDrag({
-    enabled: transferReady, sessionId: remote.session?.sessionId ?? null,
+    enabled: transferReady && !dialogOpen, pointerMode: environment?.finderDrop === true,
+    sessionId: remote.session?.sessionId ?? null,
     local: listing, remote: remote.listing, onTransfer: (requests) => { void transfers.enqueue(requests); },
   });
   const finderDrop = useFinderDrop({
@@ -254,7 +257,7 @@ export default function App() {
           }}><PanelLeft size={18} /></IconButton>
         </div>
       </header>
-      <div className="workspace-body">
+      <div className="workspace-body" ref={sidebar.workspaceRef} style={sidebar.style}>
         {mobileSidebarOpen && <button type="button" className="sidebar-scrim" aria-label="关闭侧栏" onClick={() => setMobileSidebarOpen(false)} />}
         <Sidebar profiles={profiles} groups={groups} selectedId={selectedId} environment={environment} loading={profilesLoading}
           connectedIds={remote.sessions.map((session) => session.profileId)}
@@ -265,7 +268,8 @@ export default function App() {
             trigger && previous?.trigger === trigger ? null : { profile, anchor, trigger })}
           onSelect={selectProfile} onConnect={(id) => { if (isDesktop) requestConnect(id); }}
           onNavigate={(nextPath) => { setMobileSidebarOpen(false); setActivePane("local"); void navigate(nextPath); }} />
-        <main className="workspace-main">
+        {sidebar.enabled && <div className="sidebar-resizer" {...sidebar.separatorProps} />}
+        <main className="workspace-main" id="file-workspace">
           <div className="workspace-toolbar">
             <div className="workspace-heading"><ArrowRightLeft size={17} /><span>文件管理</span></div>
             <div className="mobile-pane-switch" role="tablist" aria-label="文件位置">
@@ -326,6 +330,7 @@ export default function App() {
               profiles.find((profile) => profile.id === session.profileId)?.name ?? session.profileId]))}
             dialogBlocked={dialogOpen}
             onCancel={(id) => { void transfers.cancel(id); }} onRetry={(id) => { void transfers.retry(id); }}
+            onRemove={(id) => { void transfers.remove(id); }}
             onResolve={transfers.resolve}
             onConcurrency={(value) => { void transfers.concurrency(value); }} onClear={() => { void transfers.clear(); }} />
         </main>
@@ -362,6 +367,10 @@ export default function App() {
         <footer className="dialog-footer"><button type="button" className="button secondary" disabled={mutationBusy} onClick={() => setDeleteGroupTarget(null)}>取消</button>
           <button type="button" className="button danger" disabled={mutationBusy} onClick={() => { void deleteGroup(); }}><Trash2 size={15} />删除分组</button></footer>
       </Dialog>}
+      {drag.preview && <div className="file-drag-preview" aria-hidden="true"
+        style={{ left: Math.max(8, Math.min(window.innerWidth - 188, drag.preview.x + 14)), top: Math.max(8, Math.min(window.innerHeight - 44, drag.preview.y + 14)) }}>
+        <ArrowRightLeft size={14} /><span>{drag.preview.label}</span>
+      </div>}
     </div>
   );
 }
